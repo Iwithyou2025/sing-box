@@ -7,6 +7,7 @@
 - [1.更新信息](README.md#1更新信息)
 - [2.项目特点](README.md#2项目特点)
 - [3.Sing-box for VPS 运行脚本](README.md#3sing-box-for-vps-运行脚本)
+  - [交互输入快捷键](README.md#交互输入快捷键)
 - [4.无交互极速安装](README.md#4无交互极速安装)
 - [5.Json Argo Tunnel 获取 (推荐)](README.md#5json-argo-tunnel-获取-推荐)
 - [6.Token Argo Tunnel 方案设置任意端口回源以使用 CDN](README.md#6token-argo-tunnel-方案设置任意端口回源以使用-cdn)
@@ -24,15 +25,17 @@
 
 * * *
 ## 1.更新信息
+2026.10.13 v1.3.26 1. insert iptables / ip6tables allow rules before the first REJECT/DROP in INPUT instead of appending to the chain tail, which left node and nginx ports unreachable on images such as Oracle OCI and OpenVZ https://github.com/fscarmen/sing-box/issues/353; 2. read the latest sing-box version from releases.atom (~11 KB) instead of the GitHub releases API (~10 MB), with the API and DEFAULT_NEWEST_VERSION as fallbacks, so an empty version no longer aborts install or upgrade https://github.com/fscarmen/sing-box/issues/355; 3. Enable readline line editing for interactive prompts: arrow keys, Home / End, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Ctrl+Y and Ctrl+L now work during install and [sb -d]; non-interactive input (pipe / script) keeps the original read semantics https://github.com/fscarmen/sing-box/pull/357#issuecomment-6137941771; 4. Make the uninstall path fully offline: sb -u no longer runs CDN detection and no longer pre-downloads subscription templates, binaries or cloudflared, so it completes immediately on hosts that cannot reach GitHub https://github.com/fscarmen/sing-box/issues/358; 1. iptables / ip6tables 放行规则改为插入 INPUT链第一条 REJECT/DROP 之前，不再追加到链尾，修复甲骨文 OCI、OpenVZ 等镜像上节点端口与 nginx 端口无法访问的问题 https://github.com/fscarmen/sing-box/issues/353; 2. 最新版本号改从 releases.atom 获取（约 11 KB），替代返回约 10 MB 的 github api，api 与 DEFAULT_NEWEST_VERSION 作为兜底，取不到版本号导致安装或升级中断的问题不再发生 https://github.com/fscarmen/sing-box/issues/355; 3.交互输入启用 readline 行编辑：安装与 [sb -d] 提示中支持方向键、Home / End、Ctrl+A、Ctrl+E、Ctrl+K、Ctrl+U、Ctrl+W、Ctrl+Y、Ctrl+L；管道 / 脚本等非交互输入保持原 read 语义 https://github.com/fscarmen/sing-box/pull/357#issuecomment-6137941771 ；4. 卸载流程完全离线化：sb -u 不再执行 CDN 探测，也不再预下载订阅模板、二进制与 cloudflared，GitHub 不可达时也能立即完成卸载 https://github.com/fscarmen/sing-box/issues/358
+
 2026.09.16 v1.3.25 Add Hysteria2 ignore_client_bandwidth toggle in [sb -d], default off; [sb -d] 新增 Hysteria2 ignore_client_bandwidth 开关，新安装默认关闭
 
 2026.08.21 v1.3.24 1. Add no-TUN environment support; 2. Fix Alpine OpenRC service stop error; 1. 新增无 TUN 环境支持; 2. 修复 Alpine OpenRC 服务停止误报
 
-2026.08.14 v1.3.23 Force HTTP/2 transport for cloudflared tunnels; cloudflared 隧道统一使用 HTTP/2 传输
-
 <details>
     <summary>历史更新 history（点击即可展开或收起）</summary>
 <br>
+
+>2026.08.14 v1.3.23 Force HTTP/2 transport for cloudflared tunnels; cloudflared 隧道统一使用 HTTP/2 传>输
 
 >2026.08.11 v1.3.22 make Hysteria2 Realm and port hopping mutually exclusive with confirm prompts in install and [sb -d]; 安装与 [sb -d] 修改链路中 Realm 与端口跳跃互斥，切换前均先提示确认
 >
@@ -207,6 +210,23 @@ sb
   | -v              | Sync Argo Xray to the newest 同步 Argo Xray 到最新版本 |
   | -b              | Upgrade kernel, turn on BBR, change Linux system 升级内核、安装BBR、DD脚本 |
   | -r              | Add and remove protocols 添加和删除协议 |
+
+
+### 交互输入快捷键
+
+脚本在**交互终端**下为所有输入启用 readline 行编辑，安装与 `sb -d` 修改等提示均支持下列按键；管道、`bash <(...)` 等非交互场景保持原 read 语义，不受影响。
+
+| 按键 | 作用 |
+| --- | --- |
+| `←` / `→` | 光标左移 / 右移 |
+| `Home` / `End`，或 `Ctrl+A` / `Ctrl+E` | 跳到行首 / 行尾 |
+| `Backspace` / `Delete` | 删除光标前 / 后一个字符 |
+| `Ctrl+U` | 删除**光标到行首**的内容（光标在行尾时等同于清空当前行） |
+| `Ctrl+K` | 删除**光标到行尾**的内容 |
+| `Ctrl+W` | 删除光标前的**一个词**（以空格分隔） |
+| `Alt+D` | 删除光标后的**一个词** |
+| `Ctrl+Y` | 粘回最近一次被 `Ctrl+U` / `Ctrl+K` / `Ctrl+W` 删除的内容 |
+| `Ctrl+L` | 清屏并重绘当前行 |
 
 
 ## 4.无交互极速安装:
