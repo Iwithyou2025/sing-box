@@ -10,7 +10,7 @@ printf 'ExecStart=/tmp/cloudflared tunnel --url http://localhost:8080\n' > "$ARG
 chmod +x "$WORK_DIR/sb"
 
 # Load the actual current function with only hardcoded filesystem paths sandboxed.
-sed -n '/^argo_monitor_sync() {/,/^}/p' sing-box.sh |
+sed -n '/^argo_monitor_sync() {/,/^argo_monitor_live_domain() {/p' sing-box.sh | sed '$d' |
   sed -e "s|/etc/systemd/system/argo-monitor.service|$WORK_DIR/argo-monitor.service|g" \
       -e "s|/etc/init.d/argo-monitor|$WORK_DIR/argo-monitor.init|g" \
       -e "s|/usr/bin/sb|$WORK_DIR/sb|g" > "$WORK_DIR/func.sh"
@@ -59,7 +59,7 @@ count_commands() {
 }
 
 SYSTEM=Ubuntu
-: > "$WORK_DIR/argo-monitor.service"
+printf '[Unit]\n' > "$WORK_DIR/argo-monitor.service"
 
 # Fully active & enabled: avoid needless service restart.
 reset_case
@@ -98,7 +98,7 @@ fi
 
 # Alpine/OpenRC: existing init script must be enabled and started.
 SYSTEM=Alpine
-: > "$WORK_DIR/argo-monitor.init"
+printf '#!/sbin/openrc-run\n' > "$WORK_DIR/argo-monitor.init"
 reset_case
 argo_monitor_sync
 count_commands 2
