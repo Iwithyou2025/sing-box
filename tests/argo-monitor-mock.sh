@@ -1,48 +1,116 @@
 #!/usr/bin/env bash
-# Isolated mock: verify changed cloudflared domain refreshes subscriptions, not the tunnel.
-set -uo pipefail
+# Mock Argo Quick Tunnel: changed-domain sync, two-failure rebuild, HTTP rejection, and cooldown.
+set -euo pipefail
 cd "$(dirname "$0")/.."
-# Extract functions only; do not execute the installer or modify the runner.
 source <(sed -n \
   -e '/^argo_monitor_live_domain() {/,/^}/p' \
   -e '/^argo_monitor_domain_healthy() {/,/^}/p' \
+  -e '/^argo_monitor_wait_domain() {/,/^}/p' \
+  -e '/^argo_monitor_publish_domain() {/,/^}/p' \
   -e '/^argo_monitor_loop() {/,/^}/p' sing-box.sh)
 
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 ARGO_DAEMON_FILE="$WORK_DIR/argo.service"
-SYSTEM='Ubuntu'
+SYSTEM=Ubuntu
 printf 'ExecStart=/etc/sing-box/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
-printf 'old-value.trycloudflare.com\n' > "$WORK_DIR/argo-domain"
 
+# Mock executable/process/services; all state isolated under WORK_DIR.
 ps() { printf '1234 %s/cloudflared tunnel --url http://localhost:8080\n' "$WORK_DIR"; }
 ss() { printf 'LISTEN 0 4096 127.0.0.1:20243 0.0.0.0:* users:(("cloudflared",pid=1234,fd=3))\n'; }
-wget() { printf '{"hostname":"new-value.trycloudflare.com"}\n'; }
-curl() { printf '200'; }
-systemctl() { return 0; }
-cmd_systemctl() { echo "$*" > "$WORK_DIR/unexpected-restart"; return 0; }
-export_list() {
-  printf 'new-value.trycloudflare.com\n' > "$WORK_DIR/argo-domain"
-  printf 'updated\n' >> "$WORK_DIR/exports"
+wget() { printf '{"hostname":"%s"}\n' "$(cat "$WORK_DIR/live")"; }
+curl() {
+  local URL="${!#}" BAD
+  BAD=$(cat "$WORK_DIR/bad_http" 2>/dev/null || true)
+  if [[ "$URL" == *"$BAD"* && -n "$BAD" ]]; then printf 503; else printf 200; fi
 }
-sleep() {
-  if [ -e "$WORK_DIR/first-tick" ]; then exit 0; fi
-  : > "$WORK_DIR/first-tick"
+systemctl() { return 0; }
+cmd_systemctl() {
+  if [ "$1" = restart ] && [ "$2" = argo ]; then
+    printf 'restart\n' >> "$WORK_DIR/restarts"
+    cat "$WORK_DIR/recovery_domain" > "$WORK_DIR/live"
+  fi
   return 0
 }
+fetch_quicktunnel_domain() {
+  [[ "$ARGO_MONITOR_VERIFIED_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  printf '%s\n' "$ARGO_MONITOR_VERIFIED_DOMAIN" > "$WORK_DIR/argo-domain"
+}
+export_list() { printf 'export\n' >> "$WORK_DIR/exports"; }
+sleep() {
+  if [ "$1" = 54 ]; then
+    local T
+    T=$(cat "$WORK_DIR/ticks" 2>/dev/null || echo 0)
+    T=$((T+1))
+    printf '%s\n' "$T" > "$WORK_DIR/ticks"
+    if [ "$T" -gt "$(cat "$WORK_DIR/tick_limit")" ]; then exit 0; fi
+  fi
+  return 0
+}
+new_case() {
+  rm -f "$WORK_DIR"/ticks "$WORK_DIR"/exports "$WORK_DIR"/restarts "$WORK_DIR"/argo-monitor.last "$WORK_DIR"/argo-monitor.attempts
+  echo 2 > "$WORK_DIR/tick_limit"
+  echo old-value.trycloudflare.com > "$WORK_DIR/argo-domain"
+  echo old-value.trycloudflare.com > "$WORK_DIR/live"
+  echo new-value.trycloudflare.com > "$WORK_DIR/recovery_domain"
+  : > "$WORK_DIR/bad_http"
+}
+assert_count() {
+  local FILE=$1 WANT=$2 NUM=0
+  if [ -f "$FILE" ]; then NUM=$(wc -l < "$FILE"); fi
+  if [ "$NUM" -ne "$WANT" ]; then
+    printf 'FAIL: %s expected %s lines, got %s\n' "$FILE" "$WANT" "$NUM" >&2
+    exit 1
+  fi
+}
+run_monitor() { ( argo_monitor_loop > "$WORK_DIR/output.log" ); }
 
-[[ "$(argo_monitor_live_domain)" == "new-value.trycloudflare.com" ]] || exit 1
-argo_monitor_domain_healthy 'new-value.trycloudflare.com' || exit 1
-( argo_monitor_loop > "$WORK_DIR/monitor.log" )
+# 1) New valid hostname; sync without restarting.
+new_case
+echo new-value.trycloudflare.com > "$WORK_DIR/live"
+run_monitor
+grep -q 'completed: HTTP verified' "$WORK_DIR/output.log"
+assert_count "$WORK_DIR/exports" 1
+assert_count "$WORK_DIR/restarts" 0
+test "$(cat "$WORK_DIR/argo-domain")" = new-value.trycloudflare.com
 
-test "$(cat "$WORK_DIR/argo-domain")" = "new-value.trycloudflare.com"
-test "$(wc -l < "$WORK_DIR/exports")" -eq 1
-test ! -f "$WORK_DIR/unexpected-restart"
-grep -q 'no tunnel restart' "$WORK_DIR/monitor.log"
+# 2) Old hostname fails twice; restart, validate candidate, then export.
+new_case
+echo old-value.trycloudflare.com > "$WORK_DIR/bad_http"
+run_monitor
+grep -q 'failed 2 times; restarting Argo (1/10)' "$WORK_DIR/output.log"
+grep -q 'completed: HTTP verified' "$WORK_DIR/output.log"
+assert_count "$WORK_DIR/restarts" 1
+assert_count "$WORK_DIR/exports" 1
+test "$(cat "$WORK_DIR/argo-domain")" = new-value.trycloudflare.com
+test "$(cat "$WORK_DIR/argo-monitor.attempts")" = 1
 
-# Unchanged and healthy: do not export a second time.
-rm -f "$WORK_DIR/first-tick"
-( argo_monitor_loop >> "$WORK_DIR/monitor.log" )
-test "$(wc -l < "$WORK_DIR/exports")" -eq 1
-test ! -f "$WORK_DIR/unexpected-restart"
-echo 'Argo monitor mock tests passed'
+# 3) New hostname returns HTTP 503; no publish/completion.
+new_case
+echo old-value.trycloudflare.com > "$WORK_DIR/bad_http"
+echo old-value.trycloudflare.com > "$WORK_DIR/recovery_domain"
+run_monitor
+grep -q 'new domain not HTTP-healthy' "$WORK_DIR/output.log"
+assert_count "$WORK_DIR/restarts" 1
+assert_count "$WORK_DIR/exports" 0
+test "$(cat "$WORK_DIR/argo-domain")" = old-value.trycloudflare.com
+
+# 4) 10 attempts recorded within 600 seconds: cooldown blocks restart.
+new_case
+echo old-value.trycloudflare.com > "$WORK_DIR/bad_http"
+echo 10 > "$WORK_DIR/argo-monitor.attempts"
+date +%s > "$WORK_DIR/argo-monitor.last"
+run_monitor
+grep -q '10 rebuild attempts reached; cooldown' "$WORK_DIR/output.log"
+assert_count "$WORK_DIR/restarts" 0
+
+# 5) Cooldown elapsed: new round starts with attempt 1.
+new_case
+echo old-value.trycloudflare.com > "$WORK_DIR/bad_http"
+echo 10 > "$WORK_DIR/argo-monitor.attempts"
+echo "$(( $(date +%s) - 601 ))" > "$WORK_DIR/argo-monitor.last"
+run_monitor
+grep -q 'restarting Argo (1/10)' "$WORK_DIR/output.log"
+assert_count "$WORK_DIR/restarts" 1
+
+echo 'PASS: Argo Quick Tunnel mock health, sync, rebuild and cooldown tests'
