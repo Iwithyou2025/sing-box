@@ -6316,10 +6316,13 @@ $(hint "⬆ Outbound (total):  $(format_traffic $OUT_SUM)")
 
 # 创建快捷方式
 create_shortcut() {
+  # 测试分支可通过 SB_SCRIPT_REF 绑定独立的远程脚本入口；正式安装默认 main。
+  local REF="${SB_SCRIPT_REF:-main}"
+  [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ && "$REF" != *..* ]] || { echo "Invalid SB_SCRIPT_REF" >&2; return 1; }
   cat > ${WORK_DIR}/sb.sh << EOF
 #!/usr/bin/env bash
 
-bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/Iwithyou2025/sing-box/main/sing-box.sh) \$@
+SB_SCRIPT_REF="$REF" bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/Iwithyou2025/sing-box/$REF/sing-box.sh) \$@
 EOF
   chmod +x ${WORK_DIR}/sb.sh
   ln -sf ${WORK_DIR}/sb.sh /usr/bin/sb
@@ -6940,8 +6943,8 @@ menu() {
 
 # 卸载是纯本地操作：跳过 CDN 探测，保证离线 / 弱网下立即进入卸载流程
 # 注：statistics_of_run_times 为运行统计，后台执行不阻塞卸载，必须与守卫分开成行保留
-[ "$IS_UNINSTALL" != 'is_uninstall' ] && [ "$IS_ARGO_MONITOR" != '1' ] && check_cdn
-[ "$IS_ARGO_MONITOR" != '1' ] && statistics_of_run_times update sing-box.sh 2>/dev/null
+[ "$IS_UNINSTALL" != 'is_uninstall' ] && [ "$IS_ARGO_MONITOR" != '1' ] && [ "$1" != '--setup-argo-monitor' ] && check_cdn
+[ "$IS_ARGO_MONITOR" != '1' ] && [ "$1" != '--setup-argo-monitor' ] && statistics_of_run_times update sing-box.sh 2>/dev/null
 
 ###### 为了给旧版本 04_experimental.json 补全 clash_api 配置并剥离 v2ray_api，将于 2026年12月31日移除
 # 卸载模式跳过：块内含服务重载 / kill -HUP，对即将删除的服务做无意义操作
@@ -7028,6 +7031,16 @@ check_root
 [ "$IS_ARGO_MONITOR" = '1' ] && L=E
 select_language
 check_system_info
+if [ "$1" = '--setup-argo-monitor' ]; then
+  if [ ! -s "$ARGO_DAEMON_FILE" ]; then
+    echo 'Argo service is not installed; nothing to monitor.' >&2
+    exit 1
+  fi
+  create_shortcut || exit 1
+  argo_monitor_sync
+  echo "Argo monitoring setup complete. Script ref: ${SB_SCRIPT_REF:-main}"
+  exit 0
+fi
 if [ "$IS_ARGO_MONITOR" = '1' ]; then
   argo_monitor_loop
   exit 0
