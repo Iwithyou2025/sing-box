@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Isolated mock: verify changed cloudflared domain refreshes subscriptions, not the tunnel.
-set -uo pipefail
+set -uxo pipefail
 cd "$(dirname "$0")/.."
 # Extract functions only; do not execute the installer or modify the runner.
 source <(sed -n \
