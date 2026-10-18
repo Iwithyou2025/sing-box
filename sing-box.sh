@@ -5548,7 +5548,7 @@ argo_monitor_loop() {
       continue
     fi
 
-    ((FAILURES++))
+    ((FAILURES+=1))
     [ "$FAILURES" -lt 2 ] && continue
     NOW=$(date +%s)
     LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null)
@@ -5566,7 +5566,7 @@ argo_monitor_loop() {
     fi
 
     # 重建前记录次数和时间，异常退出后仍能限制重建频率。
-    ((ATTEMPTS++))
+    ((ATTEMPTS+=1))
     printf '%s\n' "$ATTEMPTS" > "$WORK_DIR/argo-monitor.attempts"
     printf '%s\n' "$NOW" > "$WORK_DIR/argo-monitor.last"
     printf '[argo-monitor] %s failed 2 times; restarting Argo (%s/10)\n' "$DOMAIN" "$ATTEMPTS"
