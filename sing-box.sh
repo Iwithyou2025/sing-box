@@ -5406,7 +5406,21 @@ argo_monitor_sync() {
   [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
   if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
     [ -x /usr/bin/sb ] || return 0
-    [ -s "$FILE" ] && return 0
+    # 已有服务文件也要核实运行状态，不能直接跳过。
+    if [ -s "$FILE" ]; then
+      if [ "$SYSTEM" = 'Alpine' ]; then
+        rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+          rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+        rc-service argo-monitor status >/dev/null 2>&1 ||
+          rc-service argo-monitor start >/dev/null 2>&1 || return 1
+      else
+        if ! systemctl is-enabled --quiet argo-monitor.service ||
+           ! systemctl is-active --quiet argo-monitor.service; then
+          systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
+        fi
+      fi
+      return 0
+    fi
     if [ "$SYSTEM" = 'Alpine' ]; then
       cat > "$FILE" <<'EOF'
 #!/sbin/openrc-run
