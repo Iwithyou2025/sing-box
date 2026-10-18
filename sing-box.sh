@@ -4,7 +4,7 @@
 VERSION='v1.3.27 (2026.10.18)'
 
 # Github 反代加速代理
-GITHUB_PROXY=('https://hub.glowp.xyz/' 'https://proxy.vvvv.ee/')
+GITHUB_PROXY=('https://ghproxy.lvedong.eu.org/' 'https://accel.cloudflare.nyc.mn/')
 
 # 各变量默认值
 TEMP_DIR='/tmp/sing-box'
