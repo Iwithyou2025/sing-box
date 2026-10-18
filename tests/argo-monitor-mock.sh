@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Isolated mock: verify changed cloudflared domain refreshes subscriptions, not the tunnel.
-set -uxo pipefail
+set -uo pipefail
 cd "$(dirname "$0")/.."
 # Extract functions only; do not execute the installer or modify the runner.
 source <(sed -n \
@@ -15,7 +15,7 @@ SYSTEM='Ubuntu'
 printf 'ExecStart=/etc/sing-box/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
 printf 'old-value.trycloudflare.com\n' > "$WORK_DIR/argo-domain"
 
-ps() { printf '1234 /etc/sing-box/cloudflared tunnel --url http://localhost:8080\n'; }
+ps() { printf '1234 %s/cloudflared tunnel --url http://localhost:8080\n' "$WORK_DIR"; }
 ss() { printf 'LISTEN 0 4096 127.0.0.1:20243 0.0.0.0:* users:(("cloudflared",pid=1234,fd=3))\n'; }
 wget() { printf '{"hostname":"new-value.trycloudflare.com"}\n'; }
 curl() { printf '200'; }
