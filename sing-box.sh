@@ -5440,9 +5440,36 @@ EOF
   fi
 }
 
+
+# 只读当前 cloudflared 实际使用的临时域名；不启动或修改隧道。
+argo_monitor_live_domain() {
+  local PID ADDR HOST
+  PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
+  [[ "$PID" =~ ^[0-9]+$ ]] || return 1
+  ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
+  [ -n "$ADDR" ] || return 1
+  HOST=$(wget -qO- --timeout=3 --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
+  [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  printf '%s\n' "$HOST"
+}
+
+# 探测现有 nginx 主页对应的 HTTPS 2xx；不把 DNS 可解析当作隧道健康。
+argo_monitor_domain_healthy() {
+  local DOMAIN=$1 CODE=''
+  [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  if command -v curl >/dev/null 2>&1; then
+    CODE=$(curl -sS -L --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || return 1
+    [[ "$CODE" =~ ^2[0-9][0-9]$ ]]
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --spider --timeout=8 --tries=1 "https://$DOMAIN/" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
 # 60s 检测、3 次失败、8s HTTP 超时、10 分钟重建冷却。
 argo_monitor_loop() {
-  local FAILURES=0 DOMAIN CODE NOW LAST
+  local FAILURES=0 DOMAIN LIVE_DOMAIN NOW LAST
   while sleep 60; do
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
     # 尊重用户主动关闭服务的操作。
@@ -5457,15 +5484,30 @@ argo_monitor_loop() {
       DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR"/conf/*-ws*inbounds.json 2>/dev/null | head -n 1)
     fi
 
-    CODE=''
-    if [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
-      if command -v curl >/dev/null 2>&1; then
-        CODE=$(curl -sS -L --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null)
-      elif command -v wget >/dev/null 2>&1; then
-        wget -q --spider --timeout=8 --tries=1 "https://$DOMAIN/" >/dev/null 2>&1 && CODE=200
+    # 每 60 秒先比对 cloudflared 的实时域名，自动同步服务自身重启后的新域名。
+    # 只有真实的新域名经 HTTPS 验证成功，才调用现有订阅导出函数；不重启 Argo。
+    LIVE_DOMAIN=$(argo_monitor_live_domain)
+    if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
+       argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
+      printf '[argo-monitor] domain changed: %s -> %s; refreshing subscriptions\n' "$DOMAIN" "$LIVE_DOMAIN"
+      if (export_list >/dev/null 2>&1) &&
+         [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$LIVE_DOMAIN" ]; then
+        printf '[argo-monitor] subscriptions updated for %s (no tunnel restart)\n' "$LIVE_DOMAIN"
+      else
+        # fetch_quicktunnel_domain 可能先修改状态文件，再遇到订阅生成失败。
+        # 恢复旧状态，使下一轮仍能检测到域名变化并继续重试。
+        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+          printf '%s\n' "$DOMAIN" > "$WORK_DIR/argo-domain"
+        else
+          rm -f "$WORK_DIR/argo-domain"
+        fi
+        printf '[argo-monitor] WARNING: subscription refresh failed for %s; retry next check\n' "$LIVE_DOMAIN"
       fi
+      FAILURES=0
+      continue
     fi
-    if [[ "$CODE" =~ ^2[0-9][0-9]$ ]]; then
+
+    if argo_monitor_domain_healthy "$DOMAIN"; then
       FAILURES=0
       continue
     fi
