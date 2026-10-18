@@ -5362,14 +5362,22 @@ fetch_nodes_value() {
 # 获取 Argo 临时隧道域名
 fetch_quicktunnel_domain() {
   unset CLOUDFLARED_PID METRICS_ADDRESS ARGO_DOMAIN
-  local QUICKTUNNEL_DEADLINE=$((SECONDS + 60))
-  until [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; do
-    [ "$SECONDS" -ge "$QUICKTUNNEL_DEADLINE" ] && error " $(text 93) "
-    local CLOUDFLARED_PID=$(ps -eo pid,args | awk -v work_dir="$WORK_DIR" '$0~(work_dir"/cloudflared"){print $1;exit}')
-    [[ -z "$METRICS_ADDRESS" && "$CLOUDFLARED_PID" =~ ^[0-9]+$ ]] && local METRICS_ADDRESS=$(ss -nltp | grep "pid=$CLOUDFLARED_PID" | awk '{print $4}')
-    [ -n "$METRICS_ADDRESS" ] && ARGO_DOMAIN=$(wget --timeout=3 --tries=1 -qO- "http://$METRICS_ADDRESS/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
-    [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || sleep 2
-  done
+  local QUICKTUNNEL_DEADLINE=$((SECONDS + 10)) WAIT_LIMIT
+  # 监控已验证 HTTP 正常的域名才直接采用；避免导出期间重复获取。
+  if [ -n "${ARGO_MONITOR_VERIFIED_DOMAIN:-}" ]; then
+    [[ "$ARGO_MONITOR_VERIFIED_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+    ARGO_DOMAIN=$ARGO_MONITOR_VERIFIED_DOMAIN
+  else
+    until [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; do
+      [ "$SECONDS" -ge "$QUICKTUNNEL_DEADLINE" ] && error " $(text 93) "
+      local CLOUDFLARED_PID=$(ps -eo pid,args | awk -v work_dir="$WORK_DIR" '$0~(work_dir"/cloudflared"){print $1;exit}')
+      [[ -z "$METRICS_ADDRESS" && "$CLOUDFLARED_PID" =~ ^[0-9]+$ ]] && local METRICS_ADDRESS=$(ss -nltp | grep "pid=$CLOUDFLARED_PID" | awk '{print $4}')
+      WAIT_LIMIT=$((QUICKTUNNEL_DEADLINE - SECONDS))
+      [ "$WAIT_LIMIT" -gt 3 ] && WAIT_LIMIT=3
+      [ -n "$METRICS_ADDRESS" ] && ARGO_DOMAIN=$(wget --timeout="$WAIT_LIMIT" --tries=1 -qO- "http://$METRICS_ADDRESS/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
+      [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || { [ "$SECONDS" -ge "$QUICKTUNNEL_DEADLINE" ] || sleep 1; }
+    done
+  fi
   printf '%s\n' "$ARGO_DOMAIN" > "$WORK_DIR/argo-domain"
 
   # 把临时隧道写到 Sing-box 相应的 ws inbounds 文件
@@ -5389,7 +5397,7 @@ argo_monitor_remove() {
   else
     systemctl disable --now argo-monitor.service >/dev/null 2>&1
   fi
-  rm -f "$FILE" "$WORK_DIR/argo-monitor.last" "$WORK_DIR/argo-domain"
+  rm -f "$FILE" "$WORK_DIR/argo-monitor.last" "$WORK_DIR/argo-monitor.attempts" "$WORK_DIR/argo-domain"
   [ "$SYSTEM" != 'Alpine' ] && systemctl daemon-reload
 }
 
@@ -5444,11 +5452,12 @@ EOF
 # 只读当前 cloudflared 实际使用的临时域名；不启动或修改隧道。
 argo_monitor_live_domain() {
   local PID ADDR HOST
+  local READ_TIMEOUT="${1:-3}"
   PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
   [[ "$PID" =~ ^[0-9]+$ ]] || return 1
   ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
   [ -n "$ADDR" ] || return 1
-  HOST=$(wget -qO- --timeout=3 --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
+  HOST=$(wget -qO- --timeout="$READ_TIMEOUT" --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
   [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   printf '%s\n' "$HOST"
 }
@@ -5458,7 +5467,7 @@ argo_monitor_domain_healthy() {
   local DOMAIN=$1 CODE=''
   [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   if command -v curl >/dev/null 2>&1; then
-    CODE=$(curl -sS -L --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || return 1
+    CODE=$(curl -sS -L --connect-timeout 3 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || return 1
     [[ "$CODE" =~ ^2[0-9][0-9]$ ]]
   elif command -v wget >/dev/null 2>&1; then
     wget -q --spider --timeout=8 --tries=1 "https://$DOMAIN/" >/dev/null 2>&1
@@ -5467,12 +5476,52 @@ argo_monitor_domain_healthy() {
   fi
 }
 
-# 60s 检测、3 次失败、8s HTTP 超时、10 分钟重建冷却。
+# 获取域名最多等待10秒（仅读取、无文件副作用）。
+argo_monitor_wait_domain() {
+  local DEADLINE=$((SECONDS + 10)) REMAIN HOST
+  while [ "$SECONDS" -lt "$DEADLINE" ]; do
+    REMAIN=$((DEADLINE - SECONDS))
+    [ "$REMAIN" -gt 3 ] && REMAIN=3
+    HOST=$(argo_monitor_live_domain "$REMAIN")
+    if [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+      printf '%s\n' "$HOST"
+      return 0
+    fi
+    [ "$SECONDS" -lt "$DEADLINE" ] && sleep 1
+  done
+  return 1
+}
+
+# 新域名必须通过公网 HTTPS 的 HTTP 2xx 检查，才调用现有配置/订阅更新函数。
+argo_monitor_publish_domain() {
+  local CANDIDATE=$1 PREVIOUS=$2
+  if ! argo_monitor_domain_healthy "$CANDIDATE"; then
+    printf '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n' "$CANDIDATE"
+    return 1
+  fi
+  # 子进程仅针对本次导出复用验证过的域名，避免二次取值导致竞态。
+  if (ARGO_MONITOR_VERIFIED_DOMAIN="$CANDIDATE"; fetch_quicktunnel_domain &&
+       export_list >/dev/null 2>&1) &&
+       [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$CANDIDATE" ]; then
+    printf '[argo-monitor] completed: HTTP verified; subscriptions updated: %s\n' "$CANDIDATE"
+    return 0
+  fi
+  # 发布失败后维持旧域名指针，下轮继续检查并重试同步。
+  if [[ "$PREVIOUS" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+    printf '%s\n' "$PREVIOUS" > "$WORK_DIR/argo-domain"
+  else
+    rm -f "$WORK_DIR/argo-domain"
+  fi
+  printf '[argo-monitor] WARNING: subscription refresh failed for %s\n' "$CANDIDATE"
+  return 1
+}
+
+# 54秒检测、连续2次失败、HTTPS连接超时3秒、连续10次自动重建后冷却600秒。
 argo_monitor_loop() {
-  local FAILURES=0 DOMAIN LIVE_DOMAIN NOW LAST
-  while sleep 60; do
+  local FAILURES=0 DOMAIN LIVE_DOMAIN NEW_DOMAIN NOW LAST ATTEMPTS
+  while sleep 54; do
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
-    # 尊重用户主动关闭服务的操作。
+    # 尊重用户主动禁用 Argo 的操作。
     if [ "$SYSTEM" = 'Alpine' ]; then
       rc-update show default 2>/dev/null | grep -qw argo || { FAILURES=0; continue; }
     else
@@ -5484,25 +5533,12 @@ argo_monitor_loop() {
       DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR"/conf/*-ws*inbounds.json 2>/dev/null | head -n 1)
     fi
 
-    # 每 60 秒先比对 cloudflared 的实时域名，自动同步服务自身重启后的新域名。
-    # 只有真实的新域名经 HTTPS 验证成功，才调用现有订阅导出函数；不重启 Argo。
+    # cloudflared 自身重启获得新域名：验证后仅同步订阅，不算自动重建。
     LIVE_DOMAIN=$(argo_monitor_live_domain)
     if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
        argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
-      printf '[argo-monitor] domain changed: %s -> %s; refreshing subscriptions\n' "$DOMAIN" "$LIVE_DOMAIN"
-      if (export_list >/dev/null 2>&1) &&
-         [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$LIVE_DOMAIN" ]; then
-        printf '[argo-monitor] subscriptions updated for %s (no tunnel restart)\n' "$LIVE_DOMAIN"
-      else
-        # fetch_quicktunnel_domain 可能先修改状态文件，再遇到订阅生成失败。
-        # 恢复旧状态，使下一轮仍能检测到域名变化并继续重试。
-        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
-          printf '%s\n' "$DOMAIN" > "$WORK_DIR/argo-domain"
-        else
-          rm -f "$WORK_DIR/argo-domain"
-        fi
-        printf '[argo-monitor] WARNING: subscription refresh failed for %s; retry next check\n' "$LIVE_DOMAIN"
-      fi
+      printf '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n' "$DOMAIN" "$LIVE_DOMAIN"
+      argo_monitor_publish_domain "$LIVE_DOMAIN" "$DOMAIN" || true
       FAILURES=0
       continue
     fi
@@ -5513,38 +5549,41 @@ argo_monitor_loop() {
     fi
 
     ((FAILURES++))
-    [ "$FAILURES" -lt 3 ] && continue
+    [ "$FAILURES" -lt 2 ] && continue
     NOW=$(date +%s)
     LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null)
+    ATTEMPTS=$(cat "$WORK_DIR/argo-monitor.attempts" 2>/dev/null)
     [[ "$LAST" =~ ^[0-9]+$ ]] || LAST=0
-    if [ "$((NOW - LAST))" -lt 600 ]; then
-      printf '[argo-monitor] %s: 3 failed checks; cooldown active (%ss remaining)\n' "$DOMAIN" "$((600 - NOW + LAST))"
+    [[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || ATTEMPTS=0
+
+    # 600秒无自动重建则重置本轮次数；避免跨月累计触发冷却。
+    if [ "$NOW" -lt "$LAST" ] || [ "$((NOW - LAST))" -ge 600 ]; then
+      ATTEMPTS=0
+    fi
+    if [ "$ATTEMPTS" -ge 10 ]; then
+      printf '[argo-monitor] 10 rebuild attempts reached; cooldown %ss remaining\n' "$((600 - NOW + LAST))"
       continue
     fi
 
-    # 先持久化冷却时间，异常退出也不会导致连续重建。
+    # 重建前记录次数和时间，异常退出后仍能限制重建频率。
+    ((ATTEMPTS++))
+    printf '%s\n' "$ATTEMPTS" > "$WORK_DIR/argo-monitor.attempts"
     printf '%s\n' "$NOW" > "$WORK_DIR/argo-monitor.last"
-    printf '[argo-monitor] %s failed 3 times; restarting Argo\n' "$DOMAIN"
+    printf '[argo-monitor] %s failed 2 times; restarting Argo (%s/10)\n' "$DOMAIN" "$ATTEMPTS"
     FAILURES=0
-    if cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1; then
-      fetch_quicktunnel_domain
-      if export_list >/dev/null 2>&1; then
-        # 把当前域名作为最终状态写回；此前的手动故障模拟文件不能残留。
-        if [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] &&
-           printf '%s\n' "$ARGO_DOMAIN" > "$WORK_DIR/argo-domain"; then
-          printf '[argo-monitor] updated domain: %s; state saved\n' "$ARGO_DOMAIN"
-        else
-          echo '[argo-monitor] WARNING: domain state could not be saved'
-        fi
-      else
-        echo '[argo-monitor] WARNING: subscription export failed'
-      fi
-    else
-      echo '[argo-monitor] restart failed; waiting for cooldown'
+
+    if ! cmd_systemctl restart argo || ! cmd_systemctl status argo >/dev/null 2>&1; then
+      echo '[argo-monitor] WARNING: Argo restart failed'
+      continue
     fi
+    if ! NEW_DOMAIN=$(argo_monitor_wait_domain); then
+      echo '[argo-monitor] WARNING: timed out waiting for new domain (10s)'
+      continue
+    fi
+    # 验证候选域名后才写配置和订阅；失败则下一轮继续检测。
+    argo_monitor_publish_domain "$NEW_DOMAIN" "$DOMAIN" || true
   done
 }
-
 # 安装 sing-box 全家桶
 install_sing-box() {
   sing-box_variables
