@@ -5,6 +5,7 @@ on:
     paths:
       - 'sing-box.sh'
       - '.github/workflows/argo-monitor-check.yml'
+      - 'tests/argo-monitor-mock.sh'
   workflow_dispatch:
 
 jobs:
@@ -20,3 +21,6 @@ jobs:
           grep -q '^argo_monitor_loop() {' sing-box.sh
           grep -q '^argo_monitor_sync() {' sing-box.sh
           grep -q '^argo_monitor_remove() {' sing-box.sh
+      - name: Mock live hostname change
+        shell: bash
+        run: bash tests/argo-monitor-mock.sh
