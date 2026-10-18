@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mock Argo Quick Tunnel: changed-domain sync, two-failure rebuild, HTTP rejection, and cooldown.
-set -euo pipefail
+set -euxo pipefail
 cd "$(dirname "$0")/.."
 source <(sed -n \
   -e '/^argo_monitor_live_domain() {/,/^}/p' \
