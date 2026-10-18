@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 当前脚本版本号
-VERSION='v1.3.26 (2026.10.13)'
+VERSION='v1.3.27 (2026.10.18)'
 
 # Github 反代加速代理
 GITHUB_PROXY=('https://ghproxy.lvedong.eu.org/' 'https://accel.cloudflare.nyc.mn/')
@@ -427,8 +427,8 @@ C[199]="防火墙：该 REJECT/DROP 规则带有匹配条件，放行规则不�
 
 E[191]="Modify multiplexing"
 C[191]="修改多路复用功能"
-E[192]="Select protocols to modify (e.g. bcf; asked in input order; blank = no change):\n a. all (default)"
-C[192]="多选需要修改多路复用的协议（如 bcf，询问顺序与输入顺序一致，留空表示不修改）:\n a. all (默认)"
+E[192]="Select protocols to modify (e.g. bcf; asked in input order; blank = no change):\n a. all"
+C[192]="多选需要修改多路复用的协议（如 bcf，询问顺序与输入顺序一致，留空表示不修改）:\n a. all"
 E[193]="1: Enable multiplexing\n 2: Disable multiplexing"
 C[193]="1：开启多路复用\n 2：关闭多路复用"
 E[194]="enabled"
@@ -1933,23 +1933,34 @@ custom_route_menu() {
 
 # 获取 WARP 账户并解析到全局变量 WARP_ADDRESS6 / WARP_PRIVATE_KEY / WARP_RESERVED[1..3]
 # $1 为空则在线注册；非空则直接解析该 JSON（如安装期后台预注册的缓存）
-# 返回 0 成功 / 1 失败（接口无 id 或解析字段缺失），失败时调用方自行兜底
+# 返回 0 成功 / 1 失败（数据缺失、格式错误或 reserved 超出 0-255），失败时调用方自行兜底
 warp_account_register() {
-  local WARP_ACCOUNT="$1"
+  local WARP_ACCOUNT="${1:-}" WARP_PARSED ADDRESS6 PRIVATE_KEY R1 R2 R3
+  unset WARP_ADDRESS6 WARP_PRIVATE_KEY WARP_RESERVED
   [ -n "$WARP_ACCOUNT" ] || WARP_ACCOUNT=$(timeout 15 bash <(wget -qO- --timeout=5 --tries=1 "https://gitlab.com/fscarmen/warp/-/raw/main/api.sh") --register)
 
-  grep -q '"id"' <<< "$WARP_ACCOUNT" || return 1
+  # WARP API 返回的 JSON 排版可能变化；按字段读取，避免 AWK 把同一行的多个数字拼接。
+  # reserved 和 private_key 可能嵌套在 config 内，按字段查找，不依赖行数。
+  WARP_PARSED=$(jq_exec -er '
+    select((.id | type) == "string" and (.id | length) > 0)
+    | (.config.interface.addresses.v6 // .interface.addresses.v6 // .addresses.v6 // .v6) as $v6
+    | ([.. | objects | .private_key? // empty] | first) as $key
+    | ([.. | objects | .reserved? // empty] | first) as $reserved
+    | select(($v6 | type) == "string" and ($v6 | test("^[0-9A-Fa-f:]+$")) and ($v6 | contains(":")))
+    | select(($key | type) == "string" and ($key | test("^[A-Za-z0-9+/_-]{43}=$")))
+    | select(($reserved | type) == "array" and ($reserved | length) == 3)
+    | select(all($reserved[]; type == "number" and . == floor and . >= 0 and . <= 255))
+    | [$v6, $key, $reserved[0], $reserved[1], $reserved[2]] | @tsv
+  ' <<< "$WARP_ACCOUNT" 2>/dev/null) || return 1
 
-  WARP_ADDRESS6=$(awk -F'"' '/"v6":/ && $4 !~ /^\[/ {print $4}' <<< "$WARP_ACCOUNT")
-  WARP_PRIVATE_KEY=$(awk -F'"' '/"private_key"/{print $4}' <<< "$WARP_ACCOUNT")
-  WARP_RESERVED[1]=$(awk '/"reserved":/ {getline; gsub(/[^0-9]/, ""); print}' <<< "$WARP_ACCOUNT")
-  WARP_RESERVED[2]=$(awk '/"reserved":/ {getline; getline; gsub(/[^0-9]/, ""); print}' <<< "$WARP_ACCOUNT")
-  WARP_RESERVED[3]=$(awk '/"reserved":/ {getline; getline; getline; gsub(/[^0-9]/, ""); print}' <<< "$WARP_ACCOUNT")
+  IFS=$'\t' read -r ADDRESS6 PRIVATE_KEY R1 R2 R3 <<< "$WARP_PARSED"
+  [ -n "$ADDRESS6" ] && [ -n "$PRIVATE_KEY" ] && [ -n "$R1" ] && [ -n "$R2" ] && [ -n "$R3" ] || return 1
 
-  if [ -z "$WARP_ADDRESS6" ] || [ -z "$WARP_PRIVATE_KEY" ] || [ -z "${WARP_RESERVED[1]}" ] || [ -z "${WARP_RESERVED[2]}" ] || [ -z "${WARP_RESERVED[3]}" ]; then
-    unset WARP_ADDRESS6 WARP_PRIVATE_KEY WARP_RESERVED
-    return 1
-  fi
+  WARP_ADDRESS6="$ADDRESS6"
+  WARP_PRIVATE_KEY="$PRIVATE_KEY"
+  WARP_RESERVED[1]="$R1"
+  WARP_RESERVED[2]="$R2"
+  WARP_RESERVED[3]="$R3"
   return 0
 }
 
@@ -2195,6 +2206,7 @@ change_argo() {
 
   # 启用 Argo 服务
   cmd_systemctl enable argo
+  argo_monitor_sync
 
   # 更新节点信息和配置
   fetch_nodes_value
@@ -5361,25 +5373,242 @@ fetch_nodes_value() {
 # 获取 Argo 临时隧道域名
 fetch_quicktunnel_domain() {
   unset CLOUDFLARED_PID METRICS_ADDRESS ARGO_DOMAIN
-  local QUICKTUNNEL_ERROR_TIME=20
-  until [ -n "$ARGO_DOMAIN" ]; do
-    local CLOUDFLARED_PID=$(ps -eo pid,args | awk -v work_dir="$WORK_DIR" '$0~(work_dir"/cloudflared"){print $1;exit}')
-    [[ -z "$METRICS_ADDRESS" && "$CLOUDFLARED_PID" =~ ^[0-9]+$ ]] && local METRICS_ADDRESS=$(ss -nltp | grep "pid=$CLOUDFLARED_PID" | awk '{print $4}')
-    [ -n "$METRICS_ADDRESS" ] && ARGO_DOMAIN=$(wget -qO- http://$METRICS_ADDRESS/quicktunnel | awk -F '"' '{print $4}')
-    if [[ ! "$ARGO_DOMAIN" =~ trycloudflare\.com$ ]]; then
-      (( QUICKTUNNEL_ERROR_TIME-- )) || true
-      [ "$QUICKTUNNEL_ERROR_TIME" = '0' ] && error " $(text 93) "
-      sleep 2
-    else
-      break
-    fi
-  done
+  local QUICKTUNNEL_DEADLINE=$((SECONDS + 10)) WAIT_LIMIT
+  # 监控已验证 HTTP 正常的域名才直接采用；避免导出期间重复获取。
+  if [ -n "${ARGO_MONITOR_VERIFIED_DOMAIN:-}" ]; then
+    [[ "$ARGO_MONITOR_VERIFIED_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+    ARGO_DOMAIN=$ARGO_MONITOR_VERIFIED_DOMAIN
+  else
+    until [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; do
+      [ "$SECONDS" -ge "$QUICKTUNNEL_DEADLINE" ] && error " $(text 93) "
+      local CLOUDFLARED_PID=$(ps -eo pid,args | awk -v work_dir="$WORK_DIR" '$0~(work_dir"/cloudflared"){print $1;exit}')
+      [[ -z "$METRICS_ADDRESS" && "$CLOUDFLARED_PID" =~ ^[0-9]+$ ]] && local METRICS_ADDRESS=$(ss -nltp | grep "pid=$CLOUDFLARED_PID" | awk '{print $4}')
+      WAIT_LIMIT=$((QUICKTUNNEL_DEADLINE - SECONDS))
+      [ "$WAIT_LIMIT" -gt 3 ] && WAIT_LIMIT=3
+      [ -n "$METRICS_ADDRESS" ] && ARGO_DOMAIN=$(wget --timeout="$WAIT_LIMIT" --tries=1 -qO- "http://$METRICS_ADDRESS/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
+      [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || { [ "$SECONDS" -ge "$QUICKTUNNEL_DEADLINE" ] || sleep 1; }
+    done
+  fi
+  printf '%s\n' "$ARGO_DOMAIN" > "$WORK_DIR/argo-domain"
 
   # 把临时隧道写到 Sing-box 相应的 ws inbounds 文件
   [ -s ${WORK_DIR}/conf/17_${NODE_TAG[6]}_inbounds.json ] && sed -i "s/VMESS_HOST_DOMAIN.*/VMESS_HOST_DOMAIN\": \"$ARGO_DOMAIN\"/" ${WORK_DIR}/conf/17_${NODE_TAG[6]}_inbounds.json
   [ -s ${WORK_DIR}/conf/18_${NODE_TAG[7]}_inbounds.json ] && sed -i "s/\"server_name\":.*/\"server_name\": \"$ARGO_DOMAIN\",/" ${WORK_DIR}/conf/18_${NODE_TAG[7]}_inbounds.json
 }
 
+
+# 自动监控仅管理 Quick Tunnel；固定 Argo 隧道不受影响。
+argo_monitor_remove() {
+  local FILE
+  [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
+  [ -s "$FILE" ] || return 0
+  if [ "$SYSTEM" = 'Alpine' ]; then
+    rc-service argo-monitor stop >/dev/null 2>&1
+    rc-update del argo-monitor default >/dev/null 2>&1
+  else
+    systemctl disable --now argo-monitor.service >/dev/null 2>&1
+  fi
+  rm -f "$FILE" "$WORK_DIR/argo-monitor.last" "$WORK_DIR/argo-monitor.attempts" "$WORK_DIR/argo-domain"
+  [ "$SYSTEM" != 'Alpine' ] && systemctl daemon-reload
+}
+
+argo_monitor_sync() {
+  local FILE
+  [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
+  if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
+    [ -x /usr/bin/sb ] || return 0
+    # 已有服务文件也要核实运行状态，不能直接跳过。
+    if [ -s "$FILE" ]; then
+      if [ "$SYSTEM" = 'Alpine' ]; then
+        rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+          rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+        rc-service argo-monitor status >/dev/null 2>&1 ||
+          rc-service argo-monitor start >/dev/null 2>&1 || return 1
+      else
+        if ! systemctl is-enabled --quiet argo-monitor.service ||
+           ! systemctl is-active --quiet argo-monitor.service; then
+          systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
+        fi
+      fi
+      return 0
+    fi
+    if [ "$SYSTEM" = 'Alpine' ]; then
+      cat > "$FILE" <<'EOF'
+#!/sbin/openrc-run
+name="argo-monitor"
+description="Argo Quick Tunnel health monitor"
+command="/usr/bin/sb"
+command_args="-H"
+command_background="yes"
+pidfile="/run/argo-monitor.pid"
+output_log="/etc/sing-box/logs/argo-monitor.log"
+error_log="/etc/sing-box/logs/argo-monitor.log"
+depend() {
+  need net
+  after argo
+}
+EOF
+      chmod +x "$FILE"
+      rc-update add argo-monitor default >/dev/null 2>&1
+      rc-service argo-monitor start >/dev/null 2>&1
+    else
+      cat > "$FILE" <<'EOF'
+[Unit]
+Description=Cloudflare Quick Tunnel health monitor
+Wants=network-online.target
+After=network-online.target argo.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/sb -H
+Restart=always
+RestartSec=30s
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      systemctl enable --now argo-monitor.service >/dev/null 2>&1
+    fi
+  else
+    argo_monitor_remove
+  fi
+}
+
+
+# 只读当前 cloudflared 实际使用的临时域名；不启动或修改隧道。
+argo_monitor_live_domain() {
+  local PID ADDR HOST
+  local READ_TIMEOUT="${1:-3}"
+  PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
+  [[ "$PID" =~ ^[0-9]+$ ]] || return 1
+  ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
+  [ -n "$ADDR" ] || return 1
+  HOST=$(wget -qO- --timeout="$READ_TIMEOUT" --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
+  [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  printf '%s\n' "$HOST"
+}
+
+# 探测现有 nginx 主页对应的 HTTPS 2xx；不把 DNS 可解析当作隧道健康。
+argo_monitor_domain_healthy() {
+  local DOMAIN=$1 CODE=''
+  [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  if command -v curl >/dev/null 2>&1; then
+    CODE=$(curl -sS -L --connect-timeout 3 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || return 1
+    [[ "$CODE" =~ ^2[0-9][0-9]$ ]]
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --spider --timeout=8 --tries=1 "https://$DOMAIN/" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+# 获取域名最多等待10秒（仅读取、无文件副作用）。
+argo_monitor_wait_domain() {
+  local DEADLINE=$((SECONDS + 10)) REMAIN HOST
+  while [ "$SECONDS" -lt "$DEADLINE" ]; do
+    REMAIN=$((DEADLINE - SECONDS))
+    [ "$REMAIN" -gt 3 ] && REMAIN=3
+    HOST=$(argo_monitor_live_domain "$REMAIN" || true)
+    if [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+      printf '%s\n' "$HOST"
+      return 0
+    fi
+    [ "$SECONDS" -lt "$DEADLINE" ] && sleep 1
+  done
+  return 1
+}
+
+# 新域名必须通过公网 HTTPS 的 HTTP 2xx 检查，才调用现有配置/订阅更新函数。
+argo_monitor_publish_domain() {
+  local CANDIDATE=$1 PREVIOUS=$2
+  if ! argo_monitor_domain_healthy "$CANDIDATE"; then
+    printf '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n' "$CANDIDATE"
+    return 1
+  fi
+  # 子进程仅针对本次导出复用验证过的域名，避免二次取值导致竞态。
+  if (ARGO_MONITOR_VERIFIED_DOMAIN="$CANDIDATE"; fetch_quicktunnel_domain &&
+       export_list >/dev/null 2>&1) &&
+       [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$CANDIDATE" ]; then
+    printf '[argo-monitor] completed: HTTP verified; subscriptions updated: %s\n' "$CANDIDATE"
+    return 0
+  fi
+  # 发布失败后维持旧域名指针，下轮继续检查并重试同步。
+  if [[ "$PREVIOUS" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+    printf '%s\n' "$PREVIOUS" > "$WORK_DIR/argo-domain"
+  else
+    rm -f "$WORK_DIR/argo-domain"
+  fi
+  printf '[argo-monitor] WARNING: subscription refresh failed for %s\n' "$CANDIDATE"
+  return 1
+}
+
+# 54秒检测、连续2次失败、HTTPS连接超时3秒、连续10次自动重建后冷却600秒。
+argo_monitor_loop() {
+  local FAILURES=0 DOMAIN LIVE_DOMAIN NEW_DOMAIN NOW LAST ATTEMPTS
+  while sleep 54; do
+    [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
+    # 尊重用户主动禁用 Argo 的操作。
+    if [ "$SYSTEM" = 'Alpine' ]; then
+      rc-update show default 2>/dev/null | grep -qw argo || { FAILURES=0; continue; }
+    else
+      systemctl is-enabled --quiet argo.service || { FAILURES=0; continue; }
+    fi
+
+    DOMAIN=$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null || true)
+    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
+      DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR"/conf/*-ws*inbounds.json 2>/dev/null | head -n 1)
+    fi
+
+    # cloudflared 自身重启获得新域名：验证后仅同步订阅，不算自动重建。
+    LIVE_DOMAIN=$(argo_monitor_live_domain || true)
+    if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
+       argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
+      printf '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n' "$DOMAIN" "$LIVE_DOMAIN"
+      argo_monitor_publish_domain "$LIVE_DOMAIN" "$DOMAIN" || true
+      FAILURES=0
+      continue
+    fi
+
+    if argo_monitor_domain_healthy "$DOMAIN"; then
+      FAILURES=0
+      continue
+    fi
+
+    ((FAILURES+=1))
+    [ "$FAILURES" -lt 2 ] && continue
+    NOW=$(date +%s)
+    LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null || true)
+    ATTEMPTS=$(cat "$WORK_DIR/argo-monitor.attempts" 2>/dev/null || true)
+    [[ "$LAST" =~ ^[0-9]+$ ]] || LAST=0
+    [[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || ATTEMPTS=0
+
+    # 600秒无自动重建则重置本轮次数；避免跨月累计触发冷却。
+    if [ "$NOW" -lt "$LAST" ] || [ "$((NOW - LAST))" -ge 600 ]; then
+      ATTEMPTS=0
+    fi
+    if [ "$ATTEMPTS" -ge 10 ]; then
+      printf '[argo-monitor] 10 rebuild attempts reached; cooldown %ss remaining\n' "$((600 - NOW + LAST))"
+      continue
+    fi
+
+    # 重建前记录次数和时间，异常退出后仍能限制重建频率。
+    ((ATTEMPTS+=1))
+    printf '%s\n' "$ATTEMPTS" > "$WORK_DIR/argo-monitor.attempts"
+    printf '%s\n' "$NOW" > "$WORK_DIR/argo-monitor.last"
+    printf '[argo-monitor] %s failed 2 times; restarting Argo (%s/10)\n' "$DOMAIN" "$ATTEMPTS"
+    FAILURES=0
+
+    if ! cmd_systemctl restart argo || ! cmd_systemctl status argo >/dev/null 2>&1; then
+      echo '[argo-monitor] WARNING: Argo restart failed'
+      continue
+    fi
+    if ! NEW_DOMAIN=$(argo_monitor_wait_domain); then
+      echo '[argo-monitor] WARNING: timed out waiting for new domain (10s)'
+      continue
+    fi
+    # 验证候选域名后才写配置和订阅；失败则下一轮继续检测。
+    argo_monitor_publish_domain "$NEW_DOMAIN" "$DOMAIN" || true
+  done
+}
 # 安装 sing-box 全家桶
 install_sing-box() {
   sing-box_variables
@@ -6198,20 +6427,25 @@ $(hint "⬆ Outbound (total):  $(format_traffic $OUT_SUM)")
   echo "$EXPORT_LIST_FILE" > ${WORK_DIR}/list
   cat ${WORK_DIR}/list
 
+  [ "$IS_ARGO_MONITOR" != '1' ] && argo_monitor_sync
   # 显示脚本使用情况数据
   statistics_of_run_times get
 }
 
 # 创建快捷方式
 create_shortcut() {
+  # 测试分支可通过 SB_SCRIPT_REF 绑定独立的远程脚本入口；正式安装默认 main。
+  local REF="${SB_SCRIPT_REF:-main}"
+  [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ && "$REF" != *..* ]] || { echo "Invalid SB_SCRIPT_REF" >&2; return 1; }
   cat > ${WORK_DIR}/sb.sh << EOF
 #!/usr/bin/env bash
 
-bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) \$@
+SB_SCRIPT_REF="$REF" bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/Iwithyou2025/sing-box/$REF/sing-box.sh) \$@
 EOF
   chmod +x ${WORK_DIR}/sb.sh
   ln -sf ${WORK_DIR}/sb.sh /usr/bin/sb
   [ -s /usr/bin/sb ] && info "\n $(text 71) "
+  argo_monitor_sync
 }
 
 # 增加或删除协议
@@ -6580,6 +6814,8 @@ change_protocols() {
     fi
   fi
 
+  argo_monitor_sync
+
   # 热更 sing-box（SIGHUP 重新加载配置，PID 不变）
   cmd_systemctl reload sing-box
 
@@ -6602,6 +6838,7 @@ change_protocols() {
 # 卸载 sing-box 全家桶
 uninstall() {
   if [ -d ${WORK_DIR} ]; then
+    argo_monitor_remove
     [ -s ${ARGO_DAEMON_FILE} ] && cmd_systemctl disable argo &>/dev/null
     [ -s ${SINGBOX_DAEMON_FILE} ] && cmd_systemctl disable sing-box &>/dev/null
     nginx_stop
@@ -6820,11 +7057,12 @@ menu() {
 # 卸载是纯本地操作：-U / -u 时置位，作为下方所有网络动作的总开关
 # 首尾补空格并用 [[:space:]] 锚定，避免 -UUID / --HY2_WARP 等含 -U 的长参数被误判
 [[ " ${*^^} " =~ [[:space:]]-U([[:space:]]|$) ]] && IS_UNINSTALL='is_uninstall'
+[[ " ${*^^} " =~ [[:space:]]-H([[:space:]]|$) ]] && IS_ARGO_MONITOR='1'
 
 # 卸载是纯本地操作：跳过 CDN 探测，保证离线 / 弱网下立即进入卸载流程
 # 注：statistics_of_run_times 为运行统计，后台执行不阻塞卸载，必须与守卫分开成行保留
-[ "$IS_UNINSTALL" != 'is_uninstall' ] && check_cdn
-statistics_of_run_times update sing-box.sh 2>/dev/null
+[ "$IS_UNINSTALL" != 'is_uninstall' ] && [ "$IS_ARGO_MONITOR" != '1' ] && [ "$1" != '--setup-argo-monitor' ] && check_cdn
+[ "$IS_ARGO_MONITOR" != '1' ] && [ "$1" != '--setup-argo-monitor' ] && statistics_of_run_times update sing-box.sh 2>/dev/null
 
 ###### 为了给旧版本 04_experimental.json 补全 clash_api 配置并剥离 v2ray_api，将于 2026年12月31日移除
 # 卸载模式跳过：块内含服务重载 / kill -HUP，对即将删除的服务做无意义操作
@@ -6908,8 +7146,23 @@ fi
 # L=${L:-E} 保证 -E / -C / --LANGUAGE 等显式指定仍然优先
 [ "$IS_UNINSTALL" = 'is_uninstall' ] && [ ! -s "${WORK_DIR}/language" ] && L=${L:-E}
 check_root
+[ "$IS_ARGO_MONITOR" = '1' ] && L=E
 select_language
 check_system_info
+if [ "$1" = '--setup-argo-monitor' ]; then
+  if [ ! -s "$ARGO_DAEMON_FILE" ]; then
+    echo 'Argo service is not installed; nothing to monitor.' >&2
+    exit 1
+  fi
+  create_shortcut || exit 1
+  argo_monitor_sync
+  echo "Argo monitoring setup complete. Script ref: ${SB_SCRIPT_REF:-main}"
+  exit 0
+fi
+if [ "$IS_ARGO_MONITOR" = '1' ]; then
+  argo_monitor_loop
+  exit 0
+fi
 check_brutal
 
 # 可以是 Key Value 或者 Key=Value 的形式。传参时，

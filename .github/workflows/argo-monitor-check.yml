@@ -1,0 +1,36 @@
+name: Argo monitor shell check
+
+on:
+  pull_request:
+    paths:
+      - 'sing-box.sh'
+      - '.github/workflows/argo-monitor-check.yml'
+      - 'tests/argo-monitor-mock.sh'
+      - 'tests/argo-monitor-service-mock.sh'
+      - 'tests/test_warp_account_parser.sh'
+  workflow_dispatch:
+
+jobs:
+  shell-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check script syntax
+        run: bash -n sing-box.sh
+      - name: Verify monitor hooks
+        shell: bash
+        run: |
+          grep -q '^argo_monitor_loop() {' sing-box.sh
+          grep -q '^argo_monitor_sync() {' sing-box.sh
+          grep -q '^argo_monitor_remove() {' sing-box.sh
+      - name: Mock live hostname change
+        shell: bash
+        run: bash tests/argo-monitor-mock.sh
+      - name: Mock repair of already installed monitor service
+        shell: bash
+        run: bash tests/argo-monitor-service-mock.sh
+      - name: WARP reserved parser and install fallback regression
+        shell: bash
+        run: |
+          command -v jq
+          bash tests/test_warp_account_parser.sh
