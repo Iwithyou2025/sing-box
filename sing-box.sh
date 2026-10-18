@@ -420,10 +420,10 @@ E[189]="Enabled. ignore_client_bandwidth: true -> commands clients to use the BB
 C[189]="已启用。ignore_client_bandwidth: true —— 命令客户端使用 BBR 拥塞控制而非 Hysteria CC（未设置 up/down）。客户端订阅不再包含 up/down。"
 E[190]="Disabled. When up_mbps/down_mbps are set, clients are denied to use the BBR CC"
 C[190]="已关闭。当设置 up/down 时，禁止客户端使用 BBR 拥塞控制"
-E[191]="Firewall: the allow rules were inserted before the final REJECT/DROP rule on the INPUT chain, so they now take effect."
-C[191]="防火墙：入站放行规则已插入到 INPUT 链末尾的 REJECT/DROP 规则之前，现已生效。"
-E[192]="Firewall: that REJECT/DROP rule carries match conditions, so the allow rules are not restricted by them. Adjust it manually if this is not intended."
-C[192]="防火墙：该 REJECT/DROP 规则带有匹配条件，放行规则不受其限制。如非预期，请自行调整该规则。"
+E[198]="Firewall: the allow rules were inserted before the final REJECT/DROP rule on the INPUT chain, so they now take effect."
+C[198]="防火墙：入站放行规则已插入到 INPUT 链末尾的 REJECT/DROP 规则之前，现已生效。"
+E[199]="Firewall: that REJECT/DROP rule carries match conditions, so the allow rules are not restricted by them. Adjust it manually if this is not intended."
+C[199]="防火墙：该 REJECT/DROP 规则带有匹配条件，放行规则不受其限制。如非预期，请自行调整该规则。"
 
 E[191]="Modify multiplexing"
 C[191]="修改多路复用功能"
@@ -3967,8 +3967,8 @@ sync_firewall_rules() {
 
   case "$FW_BACKEND" in
     alpine-iptables|iptables )
-      [ "$IPTABLES_INSERTED_BEFORE_TERMINAL" = 'yes' ] && hint "\n $(text 191) \n"
-      [ "$IPTABLES_TERMINAL_CONDITIONAL" = 'yes' ] && hint " $(text 192) \n"
+      [ "$IPTABLES_INSERTED_BEFORE_TERMINAL" = 'yes' ] && hint "\n $(text 198) \n"
+      [ "$IPTABLES_TERMINAL_CONDITIONAL" = 'yes' ] && hint " $(text 199) \n"
       ;;
   esac
 
