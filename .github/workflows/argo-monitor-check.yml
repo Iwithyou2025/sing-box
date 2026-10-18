@@ -1,0 +1,22 @@
+name: Argo monitor shell check
+
+on:
+  pull_request:
+    paths:
+      - 'sing-box.sh'
+      - '.github/workflows/argo-monitor-check.yml'
+  workflow_dispatch:
+
+jobs:
+  shell-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check script syntax
+        run: bash -n sing-box.sh
+      - name: Verify monitor hooks
+        shell: bash
+        run: |
+          grep -q '^argo_monitor_loop() {' sing-box.sh
+          grep -q '^argo_monitor_sync() {' sing-box.sh
+          grep -q '^argo_monitor_remove() {' sing-box.sh
