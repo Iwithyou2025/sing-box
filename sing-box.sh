@@ -5475,7 +5475,10 @@ argo_monitor_loop() {
     NOW=$(date +%s)
     LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null)
     [[ "$LAST" =~ ^[0-9]+$ ]] || LAST=0
-    [ "$((NOW - LAST))" -lt 600 ] && continue
+    if [ "$((NOW - LAST))" -lt 600 ]; then
+      printf '[argo-monitor] %s: 3 failed checks; cooldown active (%ss remaining)\n' "$DOMAIN" "$((600 - NOW + LAST))"
+      continue
+    fi
 
     # 先持久化冷却时间，异常退出也不会导致连续重建。
     printf '%s\n' "$NOW" > "$WORK_DIR/argo-monitor.last"
@@ -5483,8 +5486,17 @@ argo_monitor_loop() {
     FAILURES=0
     if cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1; then
       fetch_quicktunnel_domain
-      export_list >/dev/null 2>&1
-      printf '[argo-monitor] updated domain: %s\n' "$ARGO_DOMAIN"
+      if export_list >/dev/null 2>&1; then
+        # 把当前域名作为最终状态写回；此前的手动故障模拟文件不能残留。
+        if [[ "$ARGO_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] &&
+           printf '%s\n' "$ARGO_DOMAIN" > "$WORK_DIR/argo-domain"; then
+          printf '[argo-monitor] updated domain: %s; state saved\n' "$ARGO_DOMAIN"
+        else
+          echo '[argo-monitor] WARNING: domain state could not be saved'
+        fi
+      else
+        echo '[argo-monitor] WARNING: subscription export failed'
+      fi
     else
       echo '[argo-monitor] restart failed; waiting for cooldown'
     fi
