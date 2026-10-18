@@ -5482,7 +5482,7 @@ argo_monitor_wait_domain() {
   while [ "$SECONDS" -lt "$DEADLINE" ]; do
     REMAIN=$((DEADLINE - SECONDS))
     [ "$REMAIN" -gt 3 ] && REMAIN=3
-    HOST=$(argo_monitor_live_domain "$REMAIN")
+    HOST=$(argo_monitor_live_domain "$REMAIN" || true)
     if [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
       printf '%s\n' "$HOST"
       return 0
@@ -5528,13 +5528,13 @@ argo_monitor_loop() {
       systemctl is-enabled --quiet argo.service || { FAILURES=0; continue; }
     fi
 
-    DOMAIN=$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)
+    DOMAIN=$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null || true)
     if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
       DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR"/conf/*-ws*inbounds.json 2>/dev/null | head -n 1)
     fi
 
     # cloudflared 自身重启获得新域名：验证后仅同步订阅，不算自动重建。
-    LIVE_DOMAIN=$(argo_monitor_live_domain)
+    LIVE_DOMAIN=$(argo_monitor_live_domain || true)
     if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
        argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
       printf '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n' "$DOMAIN" "$LIVE_DOMAIN"
@@ -5551,8 +5551,8 @@ argo_monitor_loop() {
     ((FAILURES+=1))
     [ "$FAILURES" -lt 2 ] && continue
     NOW=$(date +%s)
-    LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null)
-    ATTEMPTS=$(cat "$WORK_DIR/argo-monitor.attempts" 2>/dev/null)
+    LAST=$(cat "$WORK_DIR/argo-monitor.last" 2>/dev/null || true)
+    ATTEMPTS=$(cat "$WORK_DIR/argo-monitor.attempts" 2>/dev/null || true)
     [[ "$LAST" =~ ^[0-9]+$ ]] || LAST=0
     [[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || ATTEMPTS=0
 
