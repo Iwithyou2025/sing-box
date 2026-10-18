@@ -6,6 +6,7 @@ on:
       - 'sing-box.sh'
       - '.github/workflows/argo-monitor-check.yml'
       - 'tests/argo-monitor-mock.sh'
+      - 'tests/argo-monitor-service-mock.sh'
   workflow_dispatch:
 
 jobs:
@@ -24,3 +25,6 @@ jobs:
       - name: Mock live hostname change
         shell: bash
         run: bash tests/argo-monitor-mock.sh
+      - name: Mock repair of already installed monitor service
+        shell: bash
+        run: bash tests/argo-monitor-service-mock.sh
