@@ -770,7 +770,7 @@ node_country_flag_resolve() {
   FLAG=$(node_country_flag_from_name "$OLD_NAME") && { printf '%s\n' "$FLAG"; return 0; }
   for FILE in "$WORK_DIR"/conf/*_inbounds.json; do
     [ -s "$FILE" ] || continue
-    LABEL=$(awk -F '"' '/"tag"[[:space:]]*:/ {print $4; exit}' "$FILE")
+    LABEL=$(sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$FILE" | head -n 1)
     FLAG=$(node_country_flag_from_name "$LABEL") && { printf '%s\n' "$FLAG"; return 0; }
   done
   if [ -s "$WORK_DIR/node-country-flag" ]; then
