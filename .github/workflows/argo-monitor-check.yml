@@ -8,6 +8,7 @@ on:
       - 'tests/argo-monitor-mock.sh'
       - 'tests/argo-monitor-service-mock.sh'
       - 'tests/test_warp_account_parser.sh'
+      - 'tests/test_node_name_flag.sh'
   workflow_dispatch:
 
 jobs:
@@ -34,3 +35,6 @@ jobs:
         run: |
           command -v jq
           bash tests/test_warp_account_parser.sh
+      - name: Node name and country flag regression
+        shell: bash
+        run: bash tests/test_node_name_flag.sh

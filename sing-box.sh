@@ -739,6 +739,72 @@ input_node_name() {
     fi
     grep -q '^$' <<< "$NODE_NAME_INPUT" && NODE_NAME_CONFIRM="$NODE_NAME_DEFAULT" || NODE_NAME_CONFIRM="${EMOJI}${NODE_NAME_INPUT}"
   fi
+  # 首次安装保存国旗，以供离线改名复用。
+  local NODE_FLAG
+  NODE_FLAG=$(node_country_flag_from_name "$NODE_NAME_CONFIRM") || true
+  [ -n "$NODE_FLAG" ] && mkdir -p "$WORK_DIR" && printf '%s\n' "$NODE_FLAG" > "$WORK_DIR/node-country-flag"
+}
+
+# 判断完整的两个区域指示符（如 🇺🇸），按 UTF-8 字节判断，兼容 C / UTF-8 locale。
+node_country_flag_valid() {
+  local HEX
+  HEX=$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -s ' \n' ' ' | sed 's/^ //;s/ $//')
+  [[ "$HEX" =~ ^f0\ 9f\ 87\ (a[6-f]|b[0-f])\ f0\ 9f\ 87\ (a[6-f]|b[0-f])$ ]]
+}
+
+# 从名称开头提取国旗，不使用当前名称有无汉字/数字判断。
+node_country_flag_from_name() {
+  local FIRST
+  FIRST="${1%% *}"
+  if node_country_flag_valid "$FIRST"; then
+    printf '%s\n' "$FIRST"
+    return 0
+  fi
+  return 1
+}
+
+# 国旗优先级：当前标签 > 旧的其他协议标签 > 已保存的国旗 > IP 查询结果。
+# 所有来源均缺失时不猜国家；允许用户直接输入 🇺🇸 94949。
+node_country_flag_resolve() {
+  local OLD_NAME="$1" FLAG='' FILE LABEL
+  FLAG=$(node_country_flag_from_name "$OLD_NAME") && { printf '%s\n' "$FLAG"; return 0; }
+  for FILE in "$WORK_DIR"/conf/*_inbounds.json; do
+    [ -s "$FILE" ] || continue
+    LABEL=$(sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$FILE" | head -n 1)
+    FLAG=$(node_country_flag_from_name "$LABEL") && { printf '%s\n' "$FLAG"; return 0; }
+  done
+  if [ -s "$WORK_DIR/node-country-flag" ]; then
+    FLAG=$(head -n 1 "$WORK_DIR/node-country-flag")
+    node_country_flag_valid "$FLAG" && { printf '%s\n' "$FLAG"; return 0; }
+  fi
+  for FLAG in "${EMOJI4:-}" "${EMOJI6:-}"; do
+    node_country_flag_valid "$FLAG" && { printf '%s\n' "$FLAG"; return 0; }
+  done
+  return 1
+}
+
+# 输入新国旗则尊重新国旗；仅输入新名称则沿用已有国旗。
+node_name_keep_flag() {
+  local OLD_NAME="$1" REQUESTED_NAME="$2" OLD_FLAG='' NEW_FLAG=''
+  NEW_FLAG=$(node_country_flag_from_name "$REQUESTED_NAME") && { printf '%s\n' "$REQUESTED_NAME"; return 0; }
+  OLD_FLAG=$(node_country_flag_resolve "$OLD_NAME") || true
+  if [ -n "$OLD_FLAG" ]; then
+    printf '%s %s\n' "$OLD_FLAG" "$REQUESTED_NAME"
+  else
+    printf '%s\n' "$REQUESTED_NAME"
+  fi
+}
+
+# 修改对应节点标签和引用并更新原 Clash provider 模板，其他订阅通过 export_list 重新导出。
+node_name_replace_files() {
+  local OLD_NAME="$1" NEW_NAME="$2" OLD_SED NEW_SED FILE
+  OLD_SED=$(printf '%s' "$OLD_NAME" | sed 's/[][\\.^$*|]/\\&/g')
+  NEW_SED=$(printf '%s' "$NEW_NAME" | sed 's/[\\&|]/\\&/g')
+  for FILE in "$WORK_DIR"/conf/*.json "$WORK_DIR"/subscribe/clash; do
+    [ -f "$FILE" ] || continue
+    grep -Fq -- "$OLD_NAME" "$FILE" || continue
+    sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+  done
 }
 
 # 更换优选域名 / reality SNI / 节点名 / UUID
@@ -1147,6 +1213,22 @@ change_config() {
     ssl_certificate "$NEW_VAL"
   elif [ "$KEY" = "serverip" ]; then
     is_valid_server_addr "$NEW_VAL" || error " $(text 133) "
+  fi
+
+  # 节点改名保留旧国旗；用户主动输入国旗则使用新国旗。
+  if [ "$KEY" = "name" ]; then
+    NEW_VAL=$(node_name_keep_flag "$OLD" "$NEW_VAL")
+    if [[ "$NEW_VAL" == *'"'* || "$NEW_VAL" == *'\'* || "$NEW_VAL" == *$'\n'* || "$NEW_VAL" == *"'"* ]]; then
+      warning " Invalid node name: quotes, backslashes and newlines are not supported. "
+      return 1
+    fi
+    node_name_replace_files "$OLD" "$NEW_VAL" || return 1
+    local NODE_FLAG
+    NODE_FLAG=$(node_country_flag_from_name "$NEW_VAL") || true
+    [ -n "$NODE_FLAG" ] && printf '%s\n' "$NODE_FLAG" > "$WORK_DIR/node-country-flag"
+    cmd_systemctl reload sing-box
+    export_list
+    return
   fi
 
   # 批量替换，更换服务IP和指纹不需重启服务
