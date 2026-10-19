@@ -9,6 +9,7 @@ on:
       - 'tests/argo-monitor-service-mock.sh'
       - 'tests/test_warp_account_parser.sh'
       - 'tests/test_node_name_flag.sh'
+      - 'tests/test_nginx_ws_read_timeout.sh'
   workflow_dispatch:
 
 jobs:
@@ -38,3 +39,6 @@ jobs:
       - name: Node name and country flag regression
         shell: bash
         run: bash tests/test_node_name_flag.sh
+      - name: Nginx WebSocket read-timeout and regeneration regression
+        shell: bash
+        run: bash tests/test_nginx_ws_read_timeout.sh

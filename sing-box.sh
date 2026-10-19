@@ -4235,6 +4235,7 @@ http {
          return 404;
       }
       proxy_pass                          http://127.0.0.1:${PORT_VMESS_WS};
+      proxy_read_timeout                  3600s;
       proxy_http_version                  1.1;
       proxy_set_header Upgrade            \$http_upgrade;
       proxy_set_header Connection         "upgrade";
@@ -4253,6 +4254,7 @@ http {
       }
       proxy_http_version                  1.1;
       proxy_pass                          https://127.0.0.1:${PORT_VLESS_WS};
+      proxy_read_timeout                  3600s;
       proxy_ssl_protocols                 TLSv1.3;
       proxy_set_header Upgrade            \$http_upgrade;
       proxy_set_header Connection         "upgrade";
