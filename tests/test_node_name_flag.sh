@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression for menu-driven node renaming and generated client names.
-set -euo pipefail
+set -euxo pipefail
 cd "$(dirname "$0")/.."
 source <(sed -n \
   -e '/^node_country_flag_valid() {/,/^}/p' \
