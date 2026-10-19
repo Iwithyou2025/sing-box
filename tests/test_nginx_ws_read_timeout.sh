@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Extract the real generator without starting the installer or changing the host.
-source <(sed -n '/^export_nginx_conf_file() {/,/^}/p' sing-box.sh)
+source <(sed -n '/^export_nginx_conf_file() {/,/^# ==================== 流量统计 ====================/p' sing-box.sh | sed '$d')
 declare -F export_nginx_conf_file >/dev/null
 
 # Pretend nginx is installed: the test only generates a configuration.
