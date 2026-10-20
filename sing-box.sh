@@ -840,8 +840,30 @@ change_config() {
   [ -n "$FP_NOW" ] || FP_NOW=chrome
   [ -n "$FP_NOW" ] && MENU_IDX+=(48) && MENU_KEY+=(fingerprint) && MENU_VAL+=("$FP_NOW")
 
-  # Per-protocol interface selector
-  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("per-protocol")
+  # Summarize actual installed protocol interfaces instead of a fixed label.
+  # No state file means legacy direct.bind_interface still applies globally.
+  local BIND_IFACE_SUMMARY="default" BIND_IFACE_STATE
+  BIND_IFACE_STATE=$(iface_state)
+  if [ -s "$BIND_IFACE_STATE" ]; then
+    local BIND_INSTALLED_JSON BIND_VALUES_JSON BIND_UNIQUE_JSON
+    BIND_INSTALLED_JSON=$(iface_installed | jq_exec -R . | jq_exec -s '.')
+    BIND_VALUES_JSON=$(jq_exec -c --argjson names "$BIND_INSTALLED_JSON" '
+      [$names[] as $name | (.[$name] // "default")] | unique
+    ' "$BIND_IFACE_STATE" 2>/dev/null)
+    if [ -z "$BIND_VALUES_JSON" ]; then
+      BIND_IFACE_SUMMARY="error"
+    else
+      BIND_IFACE_SUMMARY=$(printf '%s' "$BIND_VALUES_JSON" | jq_exec -r '
+        if length == 0 then "default"
+        elif length == 1 then .[0]
+        else "mixed (" + (join(", ")) + ")" end
+      ')
+    fi
+  else
+    BIND_IFACE_SUMMARY=$(jq_exec -r '[.outbounds[]? | select(.tag=="direct") | .bind_interface // empty][0] // "default"' "${WORK_DIR}/conf/01_outbounds.json" 2>/dev/null)
+    BIND_IFACE_SUMMARY=${BIND_IFACE_SUMMARY:-default}
+  fi
+  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("$BIND_IFACE_SUMMARY")
 
   # 订阅开关（基于 nginx.conf 文件内容检测）
   if [ -s "${WORK_DIR}/nginx.conf" ] && \
