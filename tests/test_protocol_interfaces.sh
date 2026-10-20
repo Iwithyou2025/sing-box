@@ -19,6 +19,15 @@ JSON
 printf '%s\n' '{"inbounds":[{"tag":"demo vmess-ws"}]}' > "$WORK_DIR/conf/17_vmess-ws_inbounds.json"
 printf '%s\n' '{"inbounds":[{"tag":"demo vless-ws-tls"}]}' > "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
 
+# The installer may append non-JSON metadata to WS inbound files. The real
+# sing-box runtime accepts this style, but jq on the complete file fails.
+printf '%s\n' 'WS_SERVER_IP_SHOW=example.invalid' >> "$WORK_DIR/conf/17_vmess-ws_inbounds.json"
+printf '%s\n' 'WS_SERVER_IP_SHOW=example.invalid' >> "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
+if jq -e . "$WORK_DIR/conf/17_vmess-ws_inbounds.json" >/dev/null 2>&1; then
+  echo "FAIL: WS regression fixture must be non-JSON" >&2
+  exit 1
+fi
+
 # Legacy globally bound direct must be migrated for both installed protocols.
 iface_migrate
 jq -e '."vmess-ws"=="tun0" and ."vless-ws-tls"=="tun0"' "$(iface_state)" >/dev/null
