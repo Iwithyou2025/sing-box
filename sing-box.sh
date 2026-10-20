@@ -4338,6 +4338,7 @@ iface_installed() {
       [ -s "$p" ] && { echo "${NODE_TAG[n]}"; break; }
     done
   done
+  return 0
 }
 iface_migrate() {
   local state old names
