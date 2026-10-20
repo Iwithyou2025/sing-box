@@ -6960,7 +6960,7 @@ change_protocols() {
     warning " Protocol configuration validation failed; restored original configuration "
     return 1
   fi
-  rm -rf "$IFACE_SNAPSHOT_DIR"
+  # Keep the snapshot until the live service confirms successful reload.
 
   # 无 ws 协议且无订阅时清理 nginx：先于守护文件生成，确保 ExecStartPre / start_pre 与最终状态一致
   if ! ls ${WORK_DIR}/conf/*-ws*inbounds.json >/dev/null 2>&1 && [[ -s ${WORK_DIR}/nginx.conf && "$IS_SUB" = 'no_sub' ]]; then
@@ -6992,8 +6992,22 @@ change_protocols() {
 
   argo_monitor_sync
 
-  # 热更 sing-box（SIGHUP 重新加载配置，PID 不变）
-  cmd_systemctl reload sing-box
+  # Apply the new protocol set. Keep a restorable snapshot until healthy.
+  if ! cmd_systemctl reload sing-box || ! cmd_systemctl status sing-box >/dev/null 2>&1; then
+    warning " Sing-box reload failed after protocol changes; restoring saved configuration "
+    rm -rf "${WORK_DIR}/conf"
+    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf" || error " Configuration rollback failed "
+    if [ -f "${IFACE_SNAPSHOT_DIR}/state.json" ]; then
+      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)" || error " Interface state rollback failed "
+    else
+      rm -f "$(iface_state)"
+    fi
+    cmd_systemctl reload sing-box >/dev/null 2>&1 || true
+    rm -rf "$IFACE_SNAPSHOT_DIR"
+    warning " Previous sing-box configuration restored. Check Nginx, Argo and firewall if those changed. "
+    return 1
+  fi
+  rm -rf "$IFACE_SNAPSHOT_DIR"
 
   # 同步 nginx 进程：需要则启动/热重载，不需要则停止
   nginx_sync
