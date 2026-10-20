@@ -54,3 +54,14 @@ iface_sync
 jq -e '[.outbounds[]|select(.tag|startswith("sb-if-"))]|length==0' "$WORK_DIR/conf/01_outbounds.json" >/dev/null
 jq -e '[.route.rules[]|select(.outbound=="warp-ep")]|length==1' "$WORK_DIR/conf/03_route.json" >/dev/null
 echo "PASS: per-protocol interface lifecycle regression tests"
+
+# Static guard for the protocol-change transaction: the snapshot must remain
+# available until after reload health verification, and failure must restore it.
+awk '
+  /# Apply the new protocol set. Keep a restorable snapshot until healthy./ { in_reload=1 }
+  in_reload && /cmd_systemctl status sing-box/ { health=NR }
+  in_reload && /cp -a.*IFACE_SNAPSHOT_DIR.*conf/ { restore=NR }
+  in_reload && /rm -rf "\$IFACE_SNAPSHOT_DIR"/ { cleanup=NR; if (health && restore && cleanup>restore) good=1 }
+  END { exit !good }
+' "$ROOT/sing-box.sh"
+echo "PASS: protocol reload rollback guard"
