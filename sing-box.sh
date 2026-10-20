@@ -4409,7 +4409,15 @@ iface_menu() {
     done
   fi
   local ifaces=()
-  mapfile -t ifaces < <(ip -o link show up 2>/dev/null | awk -F': ' '{split($2,a,"@");if(a[1]!="lo")print a[1]}' | sort -u)
+  if command -v ip >/dev/null 2>&1; then
+    mapfile -t ifaces < <(ip -o link show up 2>/dev/null | awk -F': ' '{split($2,a,"@");if(a[1]!="lo")print a[1]}' | sort -u)
+  elif command -v ifconfig >/dev/null 2>&1; then
+    mapfile -t ifaces < <(ifconfig -a 2>/dev/null | awk '/^[^[:space:]]/{sub(/:.*/,"",$1);if($1!="lo")print $1}' | sort -u)
+  else
+    for f in /sys/class/net/*; do
+      [ -e "$f" ] && [ "${f##*/}" != "lo" ] && ifaces+=("${f##*/}")
+    done
+  fi
   hint " 1. 默认（不指定）"
   for f in "${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
   hint " 0. cancel"
@@ -6694,6 +6702,14 @@ change_protocols() {
 
   # Migrate old global settings before deleting any protocol inbounds.
   iface_migrate || return 1
+  # Snapshot configuration before protocol deletion for validation rollback.
+  local IFACE_SNAPSHOT_DIR
+  IFACE_SNAPSHOT_DIR=$(mktemp -d "${TEMP_DIR}/protocol-change.XXXXXX") || return 1
+  cp -a "${WORK_DIR}/conf" "${IFACE_SNAPSHOT_DIR}/conf" || return 1
+  if [ -f "$(iface_state)" ]; then
+    cp -a "$(iface_state)" "${IFACE_SNAPSHOT_DIR}/state.json" || return 1
+  fi
+
   # 删除不需要的协议配置文件
   [ "${#REMOVE_FILE[@]}" -gt 0 ] && for t in "${REMOVE_FILE[@]}"; do
     rm -f ${WORK_DIR}/conf/*${t}
@@ -6928,10 +6944,23 @@ change_protocols() {
     unset PORT_NAIVE
   fi
 
-  # 生成各协议的 json 文件
+  # Rebuild and validate before reloading the live service.
   sing-box_json change
-  iface_migrate || return 1
-  iface_sync || return 1
+  local IFACE_CONFIG_OK=1
+  iface_migrate && iface_sync && "${WORK_DIR}/sing-box" check -C "${WORK_DIR}/conf" >/dev/null 2>&1 || IFACE_CONFIG_OK=0
+  if [ "$IFACE_CONFIG_OK" -ne 1 ]; then
+    rm -rf "${WORK_DIR}/conf"
+    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf"
+    if [ -f "${IFACE_SNAPSHOT_DIR}/state.json" ]; then
+      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)"
+    else
+      rm -f "$(iface_state)"
+    fi
+    rm -rf "$IFACE_SNAPSHOT_DIR"
+    warning " Protocol configuration validation failed; restored original configuration "
+    return 1
+  fi
+  rm -rf "$IFACE_SNAPSHOT_DIR"
 
   # 无 ws 协议且无订阅时清理 nginx：先于守护文件生成，确保 ExecStartPre / start_pre 与最终状态一致
   if ! ls ${WORK_DIR}/conf/*-ws*inbounds.json >/dev/null 2>&1 && [[ -s ${WORK_DIR}/nginx.conf && "$IS_SUB" = 'no_sub' ]]; then
