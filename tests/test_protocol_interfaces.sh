@@ -48,6 +48,18 @@ iface_sync
 jq -e '[.outbounds[]|select(.tag=="sb-if-eth0")]|length==1' "$WORK_DIR/conf/01_outbounds.json" >/dev/null
 jq -e '[.route.rules[]|select(.outbound=="sb-if-eth0")]|length==1' "$WORK_DIR/conf/03_route.json" >/dev/null
 
+# Invalid state must not modify existing generated outbounds or route rules.
+cp "$WORK_DIR/conf/01_outbounds.json" "$WORK_DIR/outbound.before"
+cp "$WORK_DIR/conf/03_route.json" "$WORK_DIR/route.before"
+printf '%s\n' '{"vmess-ws":42}' > "$(iface_state)"
+if iface_sync; then
+  echo "FAIL: invalid interface state accepted" >&2
+  exit 1
+fi
+cmp -s "$WORK_DIR/outbound.before" "$WORK_DIR/conf/01_outbounds.json"
+cmp -s "$WORK_DIR/route.before" "$WORK_DIR/conf/03_route.json"
+printf '%s\n' '{"vmess-ws":"eth0","vless-ws-tls":"tun0"}' > "$(iface_state)"
+
 # Reverting both to default removes all dedicated objects without touching WARP.
 printf '{}\n' > "$(iface_state)"
 iface_sync
