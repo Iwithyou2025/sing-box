@@ -840,9 +840,8 @@ change_config() {
   [ -n "$FP_NOW" ] || FP_NOW=chrome
   [ -n "$FP_NOW" ] && MENU_IDX+=(48) && MENU_KEY+=(fingerprint) && MENU_VAL+=("$FP_NOW")
 
-  # 指定网络出口
-  local BIND_IFACE_NOW=$(awk -F '"' '/"bind_interface"[[:space:]]*:[[:space:]]*"/{print $4}' "${WORK_DIR}/conf/01_outbounds.json" 2>/dev/null)
-  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("${BIND_IFACE_NOW:-default}")
+  # Per-protocol interface selector
+  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("per-protocol")
 
   # 订阅开关（基于 nginx.conf 文件内容检测）
   if [ -s "${WORK_DIR}/nginx.conf" ] && \
@@ -1100,56 +1099,7 @@ change_config() {
     export_list
     return
   elif [ "$KEY" = "bindinterface" ]; then
-    # 指定网络出口 — 获取系统接口列表 + 选择 + 更新 JSON
-    local IFACE_LIST=() CHOOSE_BIND IDX=2 TMP_FILE="${WORK_DIR}/conf/01_outbounds.json.tmp"
-
-    if command -v ip >/dev/null 2>&1; then
-      while read -r _ iface; do
-        iface="${iface%%:*}"
-        iface="${iface%%@*}"
-        [ "$iface" != "lo" ] && IFACE_LIST+=("$iface")
-      done < <(ip -o link show up 2>/dev/null)
-    elif command -v ifconfig >/dev/null 2>&1; then
-      while read -r iface _; do
-        iface="${iface%%:}"
-        [ "$iface" != "lo" ] && IFACE_LIST+=("$iface")
-      done < <(ifconfig -a 2>/dev/null | awk '/^[a-zA-Z]/')
-    else
-      for IFACE_ITEM in /sys/class/net/*; do
-        IFACE_ITEM="${IFACE_ITEM##*/}"
-        [ "$IFACE_ITEM" != "lo" ] && IFACE_LIST+=("$IFACE_ITEM")
-      done
-    fi
-    mapfile -t IFACE_LIST < <(printf '%s\n' "${IFACE_LIST[@]}" | sort -u)
-    [ "${#IFACE_LIST[@]}" -eq 0 ] && warning " $(text 84) " && return
-
-    hint "\n $(text 77) \n"
-    hint " $(text 78) "
-    for IFACE_ITEM in "${IFACE_LIST[@]}"; do
-      hint " $IDX. $IFACE_ITEM"
-      ((IDX++))
-    done
-    hint " 0. $(text 35)"
-    hint ""
-    reading " $(text 24) " CHOOSE_BIND
-
-    if [[ "$CHOOSE_BIND" == "1" || "${CHOOSE_BIND,,}" == "default" ]]; then
-      jq_exec '.outbounds |= map(if .tag == "direct" then del(.bind_interface) else . end)' \
-        "${WORK_DIR}/conf/01_outbounds.json" > "$TMP_FILE" && mv "$TMP_FILE" "${WORK_DIR}/conf/01_outbounds.json"
-      info " $(text 84) $(text 78 | sed 's/^1\. //')"
-    elif [[ "$CHOOSE_BIND" =~ ^[0-9]+$ ]] && [ "$CHOOSE_BIND" -ge 2 ] && [ "$CHOOSE_BIND" -le "$((IDX - 1))" ]; then
-      local SELECTED_IF="${IFACE_LIST[$((CHOOSE_BIND - 2))]}"
-      jq_exec --arg iface "$SELECTED_IF" '.outbounds |= map(if .tag == "direct" then .bind_interface = $iface else . end)' \
-        "${WORK_DIR}/conf/01_outbounds.json" > "$TMP_FILE" && mv "$TMP_FILE" "${WORK_DIR}/conf/01_outbounds.json"
-      info " $(text 84) $SELECTED_IF"
-    elif [ "$CHOOSE_BIND" == "0" ]; then
-      return
-    else
-      warning " Invalid selection " && return
-    fi
-
-    cmd_systemctl reload sing-box
-    export_list
+    iface_menu
     return
   elif [ "$KEY" = "subscribe" ]; then
     # 订阅开关 — 检测 nginx.conf 中是否存在订阅分发 location 块
@@ -4378,6 +4328,144 @@ ensure_stats_data() {
 }
 
 # 生成 sing-box 基础配置
+
+# Per-protocol egress settings. Stored outside conf/ and keyed by NODE_TAG.
+iface_state() { echo "$WORK_DIR/protocol-interfaces.json"; }
+iface_installed() {
+  local n p
+  for n in "${!NODE_TAG[@]}"; do
+    for p in "$WORK_DIR"/conf/*_"${NODE_TAG[n]}"_inbounds.json; do
+      [ -s "$p" ] && { echo "${NODE_TAG[n]}"; break; }
+    done
+  done
+  return 0
+}
+iface_migrate() {
+  local state old names
+  state=$(iface_state)
+  if [ -e "$state" ]; then
+    jq_exec -e 'type == "object" and all(.[]; type=="string" and length>0)' "$state" >/dev/null 2>&1
+    return $?
+  fi
+  old=$(jq_exec -r '.outbounds[]? | select(.tag=="direct") | .bind_interface // empty' "$WORK_DIR/conf/01_outbounds.json" 2>/dev/null)
+  names=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
+  jq_exec -n --arg old "$old" --argjson names "$names" 'reduce $names[] as $n ({}; if $old=="" then . else .[$n]=$old end)' > "$state.tmp" &&
+    mv "$state.tmp" "$state"
+}
+iface_sync() {
+  local state out route names config tags suffix f t tmp1 tmp2
+  state=$(iface_state); [ -s "$state" ] || return 0
+  out="$WORK_DIR/conf/01_outbounds.json"; route="$WORK_DIR/conf/03_route.json"
+  names=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
+  config=$(jq_exec -ce --argjson names "$names" '
+    if type != "object" or (all(.[]; type=="string" and length>0) | not) then error("Invalid interface settings")
+    else with_entries(select((.key as $k | $names | index($k)) != null)) end
+  ' "$state") || return 1
+  tags='{}'
+  for suffix in "${NODE_TAG[@]}"; do
+    for f in "$WORK_DIR"/conf/*_"$suffix"_inbounds.json; do
+      [ -s "$f" ] || continue
+      # Some existing WS inbound files contain installer metadata outside strict
+      # JSON; sing-box accepts them, but jq rejects the entire file. Read only
+      # the inbound tag field without parsing unrelated metadata.
+      t=$(awk -F '"' '/"tag"[[:space:]]*:[[:space:]]*"/{print $4; exit}' "$f") || return 1
+      [ -n "$t" ] || { warning " Missing inbound tag in $f "; return 1; }
+      tags=$(echo "$tags" | jq_exec -c --arg key "$suffix" --arg tag "$t" '.[$key]=$tag') || return 1
+      break
+    done
+  done
+  tmp1="$out.if-tmp"; tmp2="$route.if-tmp"
+  jq_exec --argjson binds "$config" '
+    .outbounds |= map(select((.tag | startswith("sb-if-")) | not)) |
+    (.outbounds[] | select(.tag=="direct")) |= del(.bind_interface) |
+    .outbounds += ([$binds[]] | unique | map({type:"direct",tag:("sb-if-"+.),bind_interface:.}))
+  ' "$out" > "$tmp1" || return 1
+  jq_exec --argjson binds "$config" --argjson tags "$tags" '
+    .route.rules |= map(select((.outbound // "" | startswith("sb-if-")) | not)) |
+    .route.rules += ([$binds | to_entries[] | select($tags[.key]!=null) |
+      {inbound:[$tags[.key]],action:"route",outbound:("sb-if-"+.value)}])
+  ' "$route" > "$tmp2" || { rm -f "$tmp1"; return 1; }
+  # Do not silently lose a valid outbounds file if the route move fails.
+  local backup_out backup_route
+  backup_out=$(mktemp "${out}.backup.XXXXXX") || return 1
+  backup_route=$(mktemp "${route}.backup.XXXXXX") || { rm -f "$backup_out"; return 1; }
+  cp -p "$out" "$backup_out" && cp -p "$route" "$backup_route" || { rm -f "$backup_out" "$backup_route"; return 1; }
+  if ! mv "$tmp1" "$out" || ! mv "$tmp2" "$route"; then
+    cp -p "$backup_out" "$out"
+    cp -p "$backup_route" "$route"
+    rm -f "$backup_out" "$backup_route" "$tmp1" "$tmp2"
+    return 1
+  fi
+  rm -f "$backup_out" "$backup_route"
+  printf '%s\n' "$config" > "$state.tmp" && mv "$state.tmp" "$state"
+}
+iface_menu() {
+  local state installed ans n code value choice iface='' i idx=2 chosen='[]' f oldstate oldout oldroute
+  iface_migrate || return 1
+  state=$(iface_state)
+  installed=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
+  hint " a. all"
+  for n in "${!NODE_TAG[@]}"; do
+    code=$(asc $((n+98)))
+    echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || continue
+    value=$(jq_exec -r --arg p "${NODE_TAG[n]}" '.[$p] // "default"' "$state")
+    hint " $code. ${PROTOCOL_LIST[n]} (current: $value)"
+  done
+  reading " 多选需要修改默认出口的协议（如 hi，留空表示不修改）: " ans
+  ans="${ans,,}"
+  [ -z "$ans" ] && return 0
+  if [ "$ans" = a ]; then
+    chosen="$installed"
+  else
+    [[ "$ans" =~ ^[b-m]+$ ]] || { warning " Invalid selection "; return 1; }
+    for ((i=0;i<${#ans};i++)); do
+      code="${ans:i:1}"
+      local found=''
+      for n in "${!NODE_TAG[@]}"; do
+        if [ "$code" = "$(asc $((n+98)))" ]; then found="$n"; break; fi
+      done
+      [ -n "$found" ] || return 1
+      echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || { warning " Protocol not installed "; return 1; }
+      chosen=$(echo "$chosen" | jq_exec -c --arg p "${NODE_TAG[n]}" 'if index($p)==null then .+[$p] else . end') || return 1
+    done
+  fi
+  local ifaces=()
+  if command -v ip >/dev/null 2>&1; then
+    mapfile -t ifaces < <(ip -o link show up 2>/dev/null | awk -F': ' '{split($2,a,"@");if(a[1]!="lo")print a[1]}' | sort -u)
+  elif command -v ifconfig >/dev/null 2>&1; then
+    mapfile -t ifaces < <(ifconfig -a 2>/dev/null | awk '/^[^[:space:]]/{sub(/:.*/,"",$1);if($1!="lo")print $1}' | sort -u)
+  else
+    for f in /sys/class/net/*; do
+      [ -e "$f" ] && [ "${f##*/}" != "lo" ] && ifaces+=("${f##*/}")
+    done
+  fi
+  hint " 1. 默认（不指定）"
+  for f in "${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
+  hint " 0. cancel"
+  reading " 请选择网络出口: " choice
+  case "$choice" in
+    0|'') return 0 ;;
+    1) iface='' ;;
+    *) [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=2 && choice<idx)) || return 1
+       iface="${ifaces[choice-2]}" ;;
+  esac
+  oldstate=$(cat "$state") || return 1
+  oldout=$(cat "$WORK_DIR/conf/01_outbounds.json") || return 1
+  oldroute=$(cat "$WORK_DIR/conf/03_route.json") || return 1
+  jq_exec --argjson names "$chosen" --arg iface "$iface" '
+    reduce $names[] as $n (.;if $iface=="" then del(.[$n]) else .[$n]=$iface end)
+  ' "$state" > "$state.tmp" && mv "$state.tmp" "$state" || return 1
+  if ! iface_sync || ! "$WORK_DIR/sing-box" check -C "$WORK_DIR/conf" >/dev/null 2>&1 || ! cmd_systemctl reload sing-box || ! cmd_systemctl status sing-box >/dev/null 2>&1; then
+    printf '%s\n' "$oldstate" > "$state"
+    printf '%s\n' "$oldout" > "$WORK_DIR/conf/01_outbounds.json"
+    printf '%s\n' "$oldroute" > "$WORK_DIR/conf/03_route.json"
+    cmd_systemctl reload sing-box >/dev/null 2>&1 || true
+    warning " Bind failed; restored previous config "
+    return 1
+  fi
+  info " Updated per-protocol network interface "
+}
+
 generate_sing_box_base_conf() {
   # 生成 log 配置
   cat > ${WORK_DIR}/conf/00_log.json << EOF
@@ -6633,6 +6721,16 @@ change_protocols() {
   # 如有需要，删除 hysteria2 跳跃端口，待后面添加回来
   [ "$IS_HOPPING" = 'is_hopping' ] && del_port_hopping_nat
 
+  # Migrate old global settings before deleting any protocol inbounds.
+  iface_migrate || return 1
+  # Snapshot configuration before protocol deletion for validation rollback.
+  local IFACE_SNAPSHOT_DIR
+  IFACE_SNAPSHOT_DIR=$(mktemp -d "${TEMP_DIR}/protocol-change.XXXXXX") || return 1
+  cp -a "${WORK_DIR}/conf" "${IFACE_SNAPSHOT_DIR}/conf" || return 1
+  if [ -f "$(iface_state)" ]; then
+    cp -a "$(iface_state)" "${IFACE_SNAPSHOT_DIR}/state.json" || return 1
+  fi
+
   # 删除不需要的协议配置文件
   [ "${#REMOVE_FILE[@]}" -gt 0 ] && for t in "${REMOVE_FILE[@]}"; do
     rm -f ${WORK_DIR}/conf/*${t}
@@ -6867,8 +6965,23 @@ change_protocols() {
     unset PORT_NAIVE
   fi
 
-  # 生成各协议的 json 文件
+  # Rebuild and validate before reloading the live service.
   sing-box_json change
+  local IFACE_CONFIG_OK=1
+  iface_migrate && iface_sync && "${WORK_DIR}/sing-box" check -C "${WORK_DIR}/conf" >/dev/null 2>&1 || IFACE_CONFIG_OK=0
+  if [ "$IFACE_CONFIG_OK" -ne 1 ]; then
+    rm -rf "${WORK_DIR}/conf"
+    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf"
+    if [ -f "${IFACE_SNAPSHOT_DIR}/state.json" ]; then
+      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)"
+    else
+      rm -f "$(iface_state)"
+    fi
+    rm -rf "$IFACE_SNAPSHOT_DIR"
+    warning " Protocol configuration validation failed; restored original configuration "
+    return 1
+  fi
+  # Keep the snapshot until the live service confirms successful reload.
 
   # 无 ws 协议且无订阅时清理 nginx：先于守护文件生成，确保 ExecStartPre / start_pre 与最终状态一致
   if ! ls ${WORK_DIR}/conf/*-ws*inbounds.json >/dev/null 2>&1 && [[ -s ${WORK_DIR}/nginx.conf && "$IS_SUB" = 'no_sub' ]]; then
@@ -6900,8 +7013,22 @@ change_protocols() {
 
   argo_monitor_sync
 
-  # 热更 sing-box（SIGHUP 重新加载配置，PID 不变）
-  cmd_systemctl reload sing-box
+  # Apply the new protocol set. Keep a restorable snapshot until healthy.
+  if ! cmd_systemctl reload sing-box || ! cmd_systemctl status sing-box >/dev/null 2>&1; then
+    warning " Sing-box reload failed after protocol changes; restoring saved configuration "
+    rm -rf "${WORK_DIR}/conf"
+    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf" || error " Configuration rollback failed "
+    if [ -f "${IFACE_SNAPSHOT_DIR}/state.json" ]; then
+      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)" || error " Interface state rollback failed "
+    else
+      rm -f "$(iface_state)"
+    fi
+    cmd_systemctl reload sing-box >/dev/null 2>&1 || true
+    rm -rf "$IFACE_SNAPSHOT_DIR"
+    warning " Previous sing-box configuration restored. Check Nginx, Argo and firewall if those changed. "
+    return 1
+  fi
+  rm -rf "$IFACE_SNAPSHOT_DIR"
 
   # 同步 nginx 进程：需要则启动/热重载，不需要则停止
   nginx_sync
@@ -6976,11 +7103,13 @@ version() {
       STRATEGY=${STRATEGY:-prefer_ipv4}
       command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved && local IS_PREFER_GO=false || local IS_PREFER_GO=true
 
+      iface_migrate || error " Interface migration failed "
       # 备份旧基础配置
       for i in $(ls ${WORK_DIR}/conf/0*); do
         cp $i ${i}.bak
       done
       generate_sing_box_base_conf
+      iface_sync || error " Interface sync failed "
 
       if ! $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box check -C ${WORK_DIR}/conf >/dev/null; then
         for i in $(ls ${WORK_DIR}/conf/0*.bak); do
