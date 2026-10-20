@@ -4333,9 +4333,9 @@ ensure_stats_data() {
 iface_state() { echo "$WORK_DIR/protocol-interfaces.json"; }
 iface_installed() {
   local n p
-  for n in "\${!NODE_TAG[@]}"; do
-    for p in "$WORK_DIR"/conf/*_"\${NODE_TAG[n]}"_inbounds.json; do
-      [ -s "$p" ] && { echo "\${NODE_TAG[n]}"; break; }
+  for n in "${!NODE_TAG[@]}"; do
+    for p in "$WORK_DIR"/conf/*_"${NODE_TAG[n]}"_inbounds.json; do
+      [ -s "$p" ] && { echo "${NODE_TAG[n]}"; break; }
     done
   done
 }
@@ -4355,7 +4355,7 @@ iface_sync() {
   names=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
   config=$(jq_exec -c --argjson names "$names" 'with_entries(select((.key as $k | $names | index($k)) != null))' "$state") || return 1
   tags='{}'
-  for suffix in "\${NODE_TAG[@]}"; do
+  for suffix in "${NODE_TAG[@]}"; do
     for f in "$WORK_DIR"/conf/*_"$suffix"_inbounds.json; do
       [ -s "$f" ] || continue
       t=$(jq_exec -r '.inbounds[0].tag // empty' "$f") || return 1
@@ -4374,7 +4374,8 @@ iface_sync() {
     .route.rules += ([$binds | to_entries[] | select($tags[.key]!=null) |
       {inbound:[$tags[.key]],action:"route",outbound:("sb-if-"+.value)}])
   ' "$route" > "$tmp2" || { rm -f "$tmp1"; return 1; }
-  mv "$tmp1" "$out" && mv "$tmp2" "$route"
+  mv "$tmp1" "$out" && mv "$tmp2" "$route" || return 1
+  printf '%s\n' "$config" > "$state.tmp" && mv "$state.tmp" "$state"
 }
 iface_menu() {
   local state installed ans n code value choice iface='' i idx=2 chosen='[]' f oldstate oldout oldroute
@@ -4382,40 +4383,41 @@ iface_menu() {
   state=$(iface_state)
   installed=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
   hint " a. all"
-  for n in "\${!NODE_TAG[@]}"; do
+  for n in "${!NODE_TAG[@]}"; do
     code=$(asc $((n+98)))
-    echo "$installed" | jq_exec -e --arg p "\${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || continue
-    value=$(jq_exec -r --arg p "\${NODE_TAG[n]}" '.[$p] // "default"' "$state")
-    hint " $code. \${PROTOCOL_LIST[n]} (current: $value)"
+    echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || continue
+    value=$(jq_exec -r --arg p "${NODE_TAG[n]}" '.[$p] // "default"' "$state")
+    hint " $code. ${PROTOCOL_LIST[n]} (current: $value)"
   done
   reading " Select protocols (e.g. hi; empty = unchanged): " ans
-  ans="\${ans,,}"
+  ans="${ans,,}"
   [ -z "$ans" ] && return 0
   if [ "$ans" = a ]; then
     chosen="$installed"
   else
     [[ "$ans" =~ ^[b-m]+$ ]] || { warning " Invalid selection "; return 1; }
-    for ((i=0;i<\${#ans};i++)); do
-      code="\${ans:i:1}"
-      for n in "\${!NODE_TAG[@]}"; do
-        [ "$code" = "$(asc $((n+98)))" ] && break
+    for ((i=0;i<${#ans};i++)); do
+      code="${ans:i:1}"
+      local found=''
+      for n in "${!NODE_TAG[@]}"; do
+        if [ "$code" = "$(asc $((n+98)))" ]; then found="$n"; break; fi
       done
-      [ "$n" -lt "\${#NODE_TAG[@]}" ] || return 1
-      echo "$installed" | jq_exec -e --arg p "\${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || { warning " Protocol not installed "; return 1; }
-      chosen=$(echo "$chosen" | jq_exec -c --arg p "\${NODE_TAG[n]}" 'if index($p)==null then .+[$p] else . end') || return 1
+      [ -n "$found" ] || return 1
+      echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || { warning " Protocol not installed "; return 1; }
+      chosen=$(echo "$chosen" | jq_exec -c --arg p "${NODE_TAG[n]}" 'if index($p)==null then .+[$p] else . end') || return 1
     done
   fi
   local ifaces=()
   mapfile -t ifaces < <(ip -o link show up 2>/dev/null | awk -F': ' '{split($2,a,"@");if(a[1]!="lo")print a[1]}' | sort -u)
   hint " 1. default (not bound)"
-  for f in "\${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
+  for f in "${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
   hint " 0. cancel"
   reading " Select network interface: " choice
   case "$choice" in
     0|'') return 0 ;;
     1) iface='' ;;
     *) [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=2 && choice<idx)) || return 1
-       iface="\${ifaces[choice-2]}" ;;
+       iface="${ifaces[choice-2]}" ;;
   esac
   oldstate=$(cat "$state") || return 1
   oldout=$(cat "$WORK_DIR/conf/01_outbounds.json") || return 1
@@ -6689,6 +6691,8 @@ change_protocols() {
   # 如有需要，删除 hysteria2 跳跃端口，待后面添加回来
   [ "$IS_HOPPING" = 'is_hopping' ] && del_port_hopping_nat
 
+  # Migrate old global settings before deleting any protocol inbounds.
+  iface_migrate || return 1
   # 删除不需要的协议配置文件
   [ "${#REMOVE_FILE[@]}" -gt 0 ] && for t in "${REMOVE_FILE[@]}"; do
     rm -f ${WORK_DIR}/conf/*${t}
