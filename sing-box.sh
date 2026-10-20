@@ -4389,7 +4389,7 @@ iface_menu() {
     value=$(jq_exec -r --arg p "${NODE_TAG[n]}" '.[$p] // "default"' "$state")
     hint " $code. ${PROTOCOL_LIST[n]} (current: $value)"
   done
-  reading " Select protocols (e.g. hi; empty = unchanged): " ans
+  reading " 多选需要修改默认出口的协议（如 hi，留空表示不修改）: " ans
   ans="${ans,,}"
   [ -z "$ans" ] && return 0
   if [ "$ans" = a ]; then
@@ -4409,10 +4409,10 @@ iface_menu() {
   fi
   local ifaces=()
   mapfile -t ifaces < <(ip -o link show up 2>/dev/null | awk -F': ' '{split($2,a,"@");if(a[1]!="lo")print a[1]}' | sort -u)
-  hint " 1. default (not bound)"
+  hint " 1. 默认（不指定）"
   for f in "${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
   hint " 0. cancel"
-  reading " Select network interface: " choice
+  reading " 请选择网络出口: " choice
   case "$choice" in
     0|'') return 0 ;;
     1) iface='' ;;
@@ -4425,7 +4425,7 @@ iface_menu() {
   jq_exec --argjson names "$chosen" --arg iface "$iface" '
     reduce $names[] as $n (.;if $iface=="" then del(.[$n]) else .[$n]=$iface end)
   ' "$state" > "$state.tmp" && mv "$state.tmp" "$state" || return 1
-  if ! iface_sync || ! "$WORK_DIR/sing-box" check -C "$WORK_DIR/conf" >/dev/null 2>&1 || ! cmd_systemctl reload sing-box; then
+  if ! iface_sync || ! "$WORK_DIR/sing-box" check -C "$WORK_DIR/conf" >/dev/null 2>&1 || ! cmd_systemctl reload sing-box || ! cmd_systemctl status sing-box >/dev/null 2>&1; then
     printf '%s\n' "$oldstate" > "$state"
     printf '%s\n' "$oldout" > "$WORK_DIR/conf/01_outbounds.json"
     printf '%s\n' "$oldroute" > "$WORK_DIR/conf/03_route.json"
