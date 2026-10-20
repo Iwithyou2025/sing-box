@@ -4343,7 +4343,10 @@ iface_installed() {
 iface_migrate() {
   local state old names
   state=$(iface_state)
-  [ -e "$state" ] && return 0
+  if [ -e "$state" ]; then
+    jq_exec -e 'type == "object" and all(.[]; type=="string" and length>0)' "$state" >/dev/null 2>&1
+    return $?
+  fi
   old=$(jq_exec -r '.outbounds[]? | select(.tag=="direct") | .bind_interface // empty' "$WORK_DIR/conf/01_outbounds.json" 2>/dev/null)
   names=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
   jq_exec -n --arg old "$old" --argjson names "$names" 'reduce $names[] as $n ({}; if $old=="" then . else .[$n]=$old end)' > "$state.tmp" &&
@@ -4354,7 +4357,10 @@ iface_sync() {
   state=$(iface_state); [ -s "$state" ] || return 0
   out="$WORK_DIR/conf/01_outbounds.json"; route="$WORK_DIR/conf/03_route.json"
   names=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
-  config=$(jq_exec -c --argjson names "$names" 'with_entries(select((.key as $k | $names | index($k)) != null))' "$state") || return 1
+  config=$(jq_exec -ce --argjson names "$names" '
+    if type != "object" or (all(.[]; type=="string" and length>0) | not) then error("Invalid interface settings")
+    else with_entries(select((.key as $k | $names | index($k)) != null)) end
+  ' "$state") || return 1
   tags='{}'
   for suffix in "${NODE_TAG[@]}"; do
     for f in "$WORK_DIR"/conf/*_"$suffix"_inbounds.json; do
@@ -4375,7 +4381,18 @@ iface_sync() {
     .route.rules += ([$binds | to_entries[] | select($tags[.key]!=null) |
       {inbound:[$tags[.key]],action:"route",outbound:("sb-if-"+.value)}])
   ' "$route" > "$tmp2" || { rm -f "$tmp1"; return 1; }
-  mv "$tmp1" "$out" && mv "$tmp2" "$route" || return 1
+  # Do not silently lose a valid outbounds file if the route move fails.
+  local backup_out backup_route
+  backup_out=$(mktemp "${out}.backup.XXXXXX") || return 1
+  backup_route=$(mktemp "${route}.backup.XXXXXX") || { rm -f "$backup_out"; return 1; }
+  cp -p "$out" "$backup_out" && cp -p "$route" "$backup_route" || { rm -f "$backup_out" "$backup_route"; return 1; }
+  if ! mv "$tmp1" "$out" || ! mv "$tmp2" "$route"; then
+    cp -p "$backup_out" "$out"
+    cp -p "$backup_route" "$route"
+    rm -f "$backup_out" "$backup_route" "$tmp1" "$tmp2"
+    return 1
+  fi
+  rm -f "$backup_out" "$backup_route"
   printf '%s\n' "$config" > "$state.tmp" && mv "$state.tmp" "$state"
 }
 iface_menu() {
