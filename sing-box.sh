@@ -4365,7 +4365,11 @@ iface_sync() {
   for suffix in "${NODE_TAG[@]}"; do
     for f in "$WORK_DIR"/conf/*_"$suffix"_inbounds.json; do
       [ -s "$f" ] || continue
-      t=$(jq_exec -r '.inbounds[0].tag // empty' "$f") || return 1
+      # Some existing WS inbound files contain installer metadata outside strict
+      # JSON; sing-box accepts them, but jq rejects the entire file. Read only
+      # the inbound tag field without parsing unrelated metadata.
+      t=$(awk -F '"' '/"tag"[[:space:]]*:[[:space:]]*"/{print $4; exit}' "$f") || return 1
+      [ -n "$t" ] || { warning " Missing inbound tag in $f "; return 1; }
       tags=$(echo "$tags" | jq_exec -c --arg key "$suffix" --arg tag "$t" '.[$key]=$tag') || return 1
       break
     done
