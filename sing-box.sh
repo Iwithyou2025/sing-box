@@ -172,8 +172,8 @@ E[65]="Open Realm"
 C[65]="开启 Realm"
 E[66]="Please select the protocols to be added (multiple choices possible. Press Enter to skip):"
 C[66]="请选择需要增加的协议（可以多选，回车跳过）:"
-E[67]="Bind network interface  (current: \${VAL_ITEM:-default})"
-C[67]="指定网络出口  (当前: \${VAL_ITEM:-默认})"
+E[67]="Configure protocol network interfaces"
+C[67]="指定网络出口"
 E[68]="Press [n] if there is an error, other keys to continue:"
 C[68]="如有错误请按 [n]，其他键继续:"
 E[69]="Install sba scripts (argo + sing-box) [https://github.com/fscarmen/sba]"
@@ -840,8 +840,8 @@ change_config() {
   [ -n "$FP_NOW" ] || FP_NOW=chrome
   [ -n "$FP_NOW" ] && MENU_IDX+=(48) && MENU_KEY+=(fingerprint) && MENU_VAL+=("$FP_NOW")
 
-  # Per-protocol interface selector
-  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("per-protocol")
+  # Per-protocol network interface settings: navigation entry, not a global value.
+  MENU_IDX+=(67) && MENU_KEY+=(bindinterface) && MENU_VAL+=("")
 
   # 订阅开关（基于 nginx.conf 文件内容检测）
   if [ -s "${WORK_DIR}/nginx.conf" ] && \
