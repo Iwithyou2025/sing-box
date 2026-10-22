@@ -443,8 +443,8 @@ E[199]="Argo download or validation failed; current version preserved."
 C[199]="Argo 下载或校验失败，保留当前版本。"
 E[200]="Argo failed to start; restored the previous binary."
 C[200]="Argo 启动失败，已恢复旧版核心。"
-E[201]="Argo updated, but temporary domain/subscription refresh failed; please retry sb -n."
-C[201]="Argo 已更新，但临时域名或订阅同步失败，请重试 sb -n。"
+E[201]="Argo restarted, but temporary domain/subscription refresh failed; please retry sb -n."
+C[201]="Argo 已重启，但临时域名或订阅同步失败，请重试 sb -n。"
 E[197]="Multiplexing update failed; original configurations restored."
 C[197]="多路复用更新失败，已恢复原配置。"
 
@@ -7090,6 +7090,15 @@ download_cloudflared() {
   return 1
 }
 
+# 更新或回退后的 Quick Tunnel 都可能更换域名，共用现有同步逻辑。
+argo_update_refresh_domain() {
+  grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
+  (unset ARGO_MONITOR_VERIFIED_DOMAIN; fetch_quicktunnel_domain && export_list) || {
+    warning " $(text 201) "
+    return 1
+  }
+}
+
 # 更新已安装的 Argo；未安装时不额外安装。
 argo_version() {
   local LOCAL ONLINE UPDATE RUNNING=0 CANDIDATE BACKUP
@@ -7133,21 +7142,25 @@ argo_version() {
       cmd_systemctl status argo &>/dev/null || RUNNING=2
     fi
     if [ "$RUNNING" = 2 ]; then
-      mv -f "$BACKUP" "$WORK_DIR/cloudflared"
-      cmd_systemctl restart argo
+      mv -f "$BACKUP" "$WORK_DIR/cloudflared" || { warning " Argo $(text 38): $BACKUP "; return 1; }
       warning " $(text 200) "
-      cmd_systemctl status argo &>/dev/null || warning " Argo $(text 38) "
+      if cmd_systemctl restart argo; then
+        sleep 2
+        if cmd_systemctl status argo &>/dev/null; then
+          argo_update_refresh_domain || return 1
+        else
+          warning " Argo $(text 38) "
+        fi
+      else
+        warning " Argo $(text 38) "
+      fi
       return 1
     fi
   fi
   rm -f "$BACKUP"
   info " Argo $(text 37): $ONLINE "
-  if [ "$RUNNING" = 1 ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
-    # 现有函数会同步临时域名到 WS 配置，export_list 会重新生成订阅。
-    (unset ARGO_MONITOR_VERIFIED_DOMAIN; fetch_quicktunnel_domain && export_list) || {
-      warning " $(text 201) "
-      return 1
-    }
+  if [ "$RUNNING" = 1 ]; then
+    argo_update_refresh_domain || return 1
   fi
   return 0
 }
