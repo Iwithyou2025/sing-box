@@ -437,6 +437,14 @@ E[195]="disabled"
 C[195]="关闭"
 E[196]="Multiplexing updated and reloaded."
 C[196]="多路复用配置已更新并已热加载。"
+E[198]="Sync Argo to the latest version"
+C[198]="同步 Argo 至最新版本"
+E[199]="Argo download or validation failed; current version preserved."
+C[199]="Argo 下载或校验失败，保留当前版本。"
+E[200]="Argo failed to start; restored the previous binary."
+C[200]="Argo 启动失败，已恢复旧版核心。"
+E[201]="Argo updated, but temporary domain/subscription refresh failed; please retry sb -n."
+C[201]="Argo 已更新，但临时域名或订阅同步失败，请重试 sb -n。"
 E[197]="Multiplexing update failed; original configurations restored."
 C[197]="多路复用更新失败，已恢复原配置。"
 
@@ -2439,7 +2447,7 @@ check_install() {
   # 如果有需要，后台静默下载 cloudflared（卸载模式跳过）
   if [[ "${STATUS[1]}" = "$(text 26)" || "$NONINTERACTIVE_INSTALL" = 'noninteractive_install' ]] && [ ! -s ${WORK_DIR}/cloudflared ] && [ "$IS_UNINSTALL" != 'is_uninstall' ]; then
     {
-      wget --no-check-certificate --tries=2 --timeout=10 -qO $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/cloudflared >/dev/null 2>&1
+      download_cloudflared "$TEMP_DIR/cloudflared" >/dev/null 2>&1
     }&
   elif [ "${STATUS[1]}" != "$(text 26)" ]; then
     # 查 Argo 进程号，运行时长和内存占用
@@ -7066,6 +7074,84 @@ uninstall() {
 }
 
 
+# 安装和更新共用下载入口；先验证可执行文件，失败不留下半成品。
+download_cloudflared() {
+  local TARGET="$1" PREFIX OUTPUT
+  for PREFIX in "$GH_PROXY" ''; do
+    rm -f "$TARGET"
+    if wget --no-check-certificate --tries=2 --timeout=10 -qO "$TARGET" "${PREFIX}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH" 2>/dev/null &&
+       chmod +x "$TARGET" && OUTPUT=$("$TARGET" --version 2>/dev/null) &&
+       [[ "$OUTPUT" =~ ^cloudflared[[:space:]]version[[:space:]][0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      return 0
+    fi
+    [ -z "$PREFIX" ] && break
+  done
+  rm -f "$TARGET"
+  return 1
+}
+
+# 更新已安装的 Argo；未安装时不额外安装。
+argo_version() {
+  local LOCAL ONLINE UPDATE RUNNING=0 CANDIDATE BACKUP
+  if [ ! -x "$WORK_DIR/cloudflared" ] || [ ! -s "$ARGO_DAEMON_FILE" ]; then
+    info " Argo $(text 26) "
+    return 0
+  fi
+  # 仅管理本脚本的服务，避免重启其他安装方式的 cloudflared。
+  grep -Fq "$WORK_DIR/cloudflared" "$ARGO_DAEMON_FILE" || { warning " Argo $(text 38) "; return 1; }
+  check_arch
+  CANDIDATE=$(mktemp "$WORK_DIR/.cloudflared-update.XXXXXX") || return 1
+  if ! download_cloudflared "$CANDIDATE"; then
+    warning " $(text 199) "
+    return 1
+  fi
+  LOCAL=$("$WORK_DIR/cloudflared" --version 2>/dev/null | awk '{print $3}')
+  ONLINE=$("$CANDIDATE" --version | awk '{print $3}')
+  info " Argo: $LOCAL -> $ONLINE "
+  if [ "$LOCAL" = "$ONLINE" ]; then
+    rm -f "$CANDIDATE"
+    info " $(text 41) "
+    return 0
+  fi
+  reading " $(text 9) " UPDATE
+  if [ "${UPDATE,,}" != y ]; then
+    rm -f "$CANDIDATE"
+    return 0
+  fi
+  cmd_systemctl status argo &>/dev/null && RUNNING=1
+  BACKUP=$(mktemp "$WORK_DIR/.cloudflared-backup.XXXXXX") || { rm -f "$CANDIDATE"; return 1; }
+  cp -p "$WORK_DIR/cloudflared" "$BACKUP" && mv -f "$CANDIDATE" "$WORK_DIR/cloudflared" || {
+    rm -f "$CANDIDATE" "$BACKUP"
+    return 1
+  }
+  if [ "$RUNNING" = 1 ]; then
+    # restart 保留开机启动状态；已关闭的 Argo 只替换文件。
+    if ! cmd_systemctl restart argo; then
+      RUNNING=2
+    else
+      sleep 2
+      cmd_systemctl status argo &>/dev/null || RUNNING=2
+    fi
+    if [ "$RUNNING" = 2 ]; then
+      mv -f "$BACKUP" "$WORK_DIR/cloudflared"
+      cmd_systemctl restart argo
+      warning " $(text 200) "
+      cmd_systemctl status argo &>/dev/null || warning " Argo $(text 38) "
+      return 1
+    fi
+  fi
+  rm -f "$BACKUP"
+  info " Argo $(text 37): $ONLINE "
+  if [ "$RUNNING" = 1 ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
+    # 现有函数会同步临时域名到 WS 配置，export_list 会重新生成订阅。
+    (unset ARGO_MONITOR_VERIFIED_DOMAIN; fetch_quicktunnel_domain && export_list) || {
+      warning " $(text 201) "
+      return 1
+    }
+  fi
+  return 0
+}
+
 # Sing-box 的最新版本
 version() {
   # 获取需要下载的 sing-box 版本
@@ -7157,12 +7243,13 @@ menu_setting() {
     OPTION[4]="4 .  $(text 92)"
     OPTION[5]="5 .  $(text 121)"
     OPTION[6]="6 .  $(text 31)"
-    OPTION[7]="7 .  $(text 32)"
-    OPTION[8]="8 .  $(text 62)"
-    OPTION[9]="9 .  $(text 33)"
-    OPTION[10]="10.  $(text 59)"
-    OPTION[11]="11.  $(text 69)"
-    OPTION[12]="12.  $(text 76)"
+    OPTION[7]="7 .  $(text 198)"
+    OPTION[8]="8 .  $(text 32)"
+    OPTION[9]="9 .  $(text 62)"
+    OPTION[10]="10.  $(text 33)"
+    OPTION[11]="11.  $(text 59)"
+    OPTION[12]="12.  $(text 69)"
+    OPTION[13]="13.  $(text 76)"
 
     ACTION[1]() { export_list; exit 0; }
 
@@ -7192,12 +7279,13 @@ menu_setting() {
     ACTION[4]() { change_argo; exit; }
     ACTION[5]() { change_config; exit; }
     ACTION[6]() { version; exit; }
-    ACTION[7]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
-    ACTION[8]() { change_protocols; exit; }
-    ACTION[9]() { uninstall; exit; }
-    ACTION[10]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/argox/main/argox.sh) -$L; exit; }
-    ACTION[11]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/sba/main/sba.sh) -$L; exit; }
-    ACTION[12]() { bash <(wget --no-check-certificate -qO- https://tcp.hy2.sh/); exit; }
+    ACTION[7]() { argo_version; exit $?; }
+    ACTION[8]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
+    ACTION[9]() { change_protocols; exit; }
+    ACTION[10]() { uninstall; exit; }
+    ACTION[11]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/argox/main/argox.sh) -$L; exit; }
+    ACTION[12]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/sba/main/sba.sh) -$L; exit; }
+    ACTION[13]() { bash <(wget --no-check-certificate -qO- https://tcp.hy2.sh/); exit; }
   else
     OPTION[1]="1.  $(text 115)"
     OPTION[2]="2.  $(text 34) + Argo + $(text 80) $(text 89)"
