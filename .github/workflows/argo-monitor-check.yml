@@ -10,6 +10,7 @@ on:
       - 'tests/test_warp_account_parser.sh'
       - 'tests/test_node_name_flag.sh'
       - 'tests/test_nginx_ws_read_timeout.sh'
+      - 'tests/test_argo_update.sh'
   workflow_dispatch:
 
 jobs:
@@ -42,3 +43,7 @@ jobs:
       - name: Nginx WebSocket read-timeout and regeneration regression
         shell: bash
         run: bash tests/test_nginx_ws_read_timeout.sh
+
+      - name: Argo update and rollback regression
+        shell: bash
+        run: bash tests/test_argo_update.sh
