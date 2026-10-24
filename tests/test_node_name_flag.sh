@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source <(sed -n \
+  -e '/^input_node_name() {/,/^}/p' \
+  -e '/^change_config() {/,/^}/p' \
   -e '/^node_country_flag_valid() {/,/^}/p' \
   -e '/^node_country_flag_from_name() {/,/^}/p' \
   -e '/^node_country_flag_resolve() {/,/^}/p' \
@@ -97,3 +99,84 @@ node_name_replace_files '🇺🇸 old[1].node' '🇺🇸 New & Group | 42'
 assert_eq "$(read_vm_name)" '🇺🇸 New & Group | 42'
 assert_json "$WORK_DIR/conf/17_vmess-ws_inbounds.json"
 echo 'PASS: exact user VMess rename, country-flag recovery, locale neutrality, cache, and JSON integrity'
+
+# Attached flags, flag-only names, invalid prefixes, and repeated edits.
+for LOCALE_TEST in C C.UTF-8; do
+  (
+    export LC_ALL="$LOCALE_TEST"
+    reset_case
+    for NAME in '🇩🇪德国' '🇩🇪 Germany' '🇩🇪' '🇯🇵東京' '🇬🇧London'; do
+      assert_eq "$(node_name_keep_flag '🇺🇸 old' "$NAME")" "$NAME"
+    done
+    for NAME in '🇩' '🏳️ name' '德国' 'DE Berlin'; do
+      assert_eq "$(node_name_keep_flag '🇺🇸 old' "$NAME")" "🇺🇸 $NAME"
+    done
+    assert_eq "$(node_name_keep_flag '🇩🇪德国' 'Berlin')" '🇩🇪 Berlin'
+    assert_eq "$(node_name_keep_flag '🇩🇪德国' '🇯🇵東京')" '🇯🇵東京'
+    # Fresh installation uses the actual prompt path with conflicting GeoIP.
+    set +u
+    text() { :; }
+    reading() { printf -v "$2" '%s' "$TEST_INPUT"; }
+    EMOJI4=🇺🇸
+    for TEST_INPUT in '🇩🇪德国' '🇩🇪 Germany' 'Berlin'; do
+      unset NODE_NAME_CONFIRM
+      input_node_name
+      EXPECTED="$TEST_INPUT"
+      [[ "$TEST_INPUT" == Berlin ]] && EXPECTED='🇺🇸 Berlin'
+      assert_eq "$NODE_NAME_CONFIRM" "$EXPECTED"
+      assert_eq "$(cat "$WORK_DIR/node-country-flag")" "$(node_country_flag_from_name "$EXPECTED")"
+    done
+    TEST_INPUT=''
+    unset NODE_NAME_CONFIRM
+    input_node_name
+    assert_eq "$NODE_NAME_CONFIRM" "🇺🇸 $(hostname)"
+    # Real menu path: old installation, route references, template and cache.
+    hint() { :; }; info() { :; }; warning() { :; }
+    format_ports_display() { printf '%s' "$*"; }
+    cmd_systemctl() { RELOADED=yes; }
+    export_list() { EXPORTED="$NODE_NAME_CONFIRM"; }
+    reading() {
+      case "$2" in
+        CHOOSE_NODE_INFO)
+          for i in "${!MENU_KEY[@]}"; do
+            [[ "${MENU_KEY[i]}" == name ]] && printf -v "$2" '%s' "$((i+1))" && break
+          done ;;
+        NEW_VAL) printf -v "$2" '%s' "$TEST_INPUT" ;;
+      esac
+    }
+    L=C
+    declare -a C=()
+    reset_case
+    EMOJI4=🇺🇸
+    write_inbound '17_vmess-ws_inbounds.json' '🇺🇸 old vmess-ws'
+    printf "u: &u '🇺🇸 old'\n" > "$WORK_DIR/subscribe/clash"
+    printf '{"rules":[{"inbound":["🇺🇸 old vmess-ws"]}]}\n' > "$WORK_DIR/conf/03_route.json"
+    NODE_NAME_CONFIRM='🇺🇸 stale'
+    for TEST_INPUT in '🇩🇪德国' 'Berlin' '🇯🇵Tokyo'; do
+      change_config
+      EXPECTED="$TEST_INPUT"
+      [[ "$TEST_INPUT" == Berlin ]] && EXPECTED='🇩🇪 Berlin'
+      assert_eq "$(read_vm_name)" "$EXPECTED"
+      assert_eq "$EXPORTED" "$EXPECTED"
+      assert_eq "$RELOADED" yes
+      grep -Fq "$EXPECTED vmess-ws" "$WORK_DIR/conf/03_route.json"
+      grep -Fq "$EXPECTED" "$WORK_DIR/subscribe/clash"
+      assert_eq "$(cat "$WORK_DIR/node-country-flag")" "$(node_country_flag_from_name "$EXPECTED")"
+      assert_json "$WORK_DIR/conf/17_vmess-ws_inbounds.json" "$WORK_DIR/conf/03_route.json"
+    done
+    # Rejected names must leave configs/cache unchanged and skip reload/export.
+    BEFORE=$(cat "$WORK_DIR/conf/17_vmess-ws_inbounds.json")
+    for TEST_INPUT in 'bad"name' "bad'name" 'bad\name' $'bad\nname'; do
+      RELOADED=no; EXPORTED=no
+      if change_config; then echo 'FAIL: invalid name accepted'; exit 1; fi
+      assert_eq "$(cat "$WORK_DIR/conf/17_vmess-ws_inbounds.json")" "$BEFORE"
+      assert_eq "$(cat "$WORK_DIR/node-country-flag")" '🇯🇵'
+      assert_eq "$RELOADED" no
+      assert_eq "$EXPORTED" no
+    done
+    TEST_INPUT=''
+    change_config
+    assert_eq "$(cat "$WORK_DIR/conf/17_vmess-ws_inbounds.json")" "$BEFORE"
+  )
+done
+echo 'PASS: fresh install, actual rename menu, repeated country changes, stale export state, invalid input, and locale matrix'
