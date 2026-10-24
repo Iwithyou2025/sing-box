@@ -737,7 +737,7 @@ input_node_name() {
       (( STEP_NUM++ )) || true
       reading "\n ${TOTAL_STEPS:+(${STEP_NUM}/${TOTAL_STEPS}) }$(text 13) " NODE_NAME_INPUT
     fi
-    grep -q '^$' <<< "$NODE_NAME_INPUT" && NODE_NAME_CONFIRM="$NODE_NAME_DEFAULT" || NODE_NAME_CONFIRM="${EMOJI}${NODE_NAME_INPUT}"
+    grep -q '^$' <<< "$NODE_NAME_INPUT" && NODE_NAME_CONFIRM="$NODE_NAME_DEFAULT" || NODE_NAME_CONFIRM=$(node_name_keep_flag "$NODE_NAME_DEFAULT" "$NODE_NAME_INPUT")
   fi
   # 首次安装保存国旗，以供离线改名复用。
   local NODE_FLAG
@@ -754,8 +754,9 @@ node_country_flag_valid() {
 
 # 从名称开头提取国旗，不使用当前名称有无汉字/数字判断。
 node_country_flag_from_name() {
-  local FIRST
-  FIRST="${1%% *}"
+  local LC_ALL=C FIRST
+  # 两个区域指示符占 8 个 UTF-8 字节，不依赖空格或当前 locale。
+  FIRST="${1:0:8}"
   if node_country_flag_valid "$FIRST"; then
     printf '%s\n' "$FIRST"
     return 0
@@ -812,6 +813,7 @@ change_config() {
   [ ! -d "${WORK_DIR}" ] && error " $(text 107) "
 
   local MENU_IDX=() MENU_KEY=() MENU_VAL=()
+  local NEW_VAL=''
 
   # 优选 CDN
   ls ${WORK_DIR}/conf/*-ws*inbounds.json >/dev/null 2>&1 && local CDN_NOW=$(awk -F '"' '/"CDN"/{print $4; exit}' ${WORK_DIR}/conf/*-ws*inbounds.json) && MENU_IDX+=(128) && MENU_KEY+=(cdn) && MENU_VAL+=("$CDN_NOW")
@@ -1176,6 +1178,7 @@ change_config() {
     local NODE_FLAG
     NODE_FLAG=$(node_country_flag_from_name "$NEW_VAL") || true
     [ -n "$NODE_FLAG" ] && printf '%s\n' "$NODE_FLAG" > "$WORK_DIR/node-country-flag"
+    NODE_NAME_CONFIRM="$NEW_VAL"
     cmd_systemctl reload sing-box
     export_list
     return
