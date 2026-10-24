@@ -151,12 +151,16 @@ for LOCALE_TEST in C C.UTF-8; do
     write_inbound '17_vmess-ws_inbounds.json' '🇺🇸 old vmess-ws'
     printf "u: &u '🇺🇸 old'\n" > "$WORK_DIR/subscribe/clash"
     printf '{"rules":[{"inbound":["🇺🇸 old vmess-ws"]}]}\n' > "$WORK_DIR/conf/03_route.json"
+    # Mixed historical labels: the first protocol is US, VLESS is a different name/country.
+    write_inbound '18_vless-ws-tls_inbounds.json' '🇬🇧 older vless-ws-tls'
+    printf '\n"WS_SERVER_IP_SHOW": "192.0.2.1"\n"CDN": "example.com"\n' >> "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
     NODE_NAME_CONFIRM='🇺🇸 stale'
     for TEST_INPUT in '🇩🇪德国' 'Berlin' '🇯🇵Tokyo'; do
       change_config
       EXPECTED="$TEST_INPUT"
       [[ "$TEST_INPUT" == Berlin ]] && EXPECTED='🇩🇪 Berlin'
       assert_eq "$(read_vm_name)" "$EXPECTED"
+      grep -Fq "\"tag\":\"$EXPECTED vless-ws-tls\"" "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
       assert_eq "$EXPORTED" "$EXPECTED"
       assert_eq "$RELOADED" yes
       grep -Fq "$EXPECTED vmess-ws" "$WORK_DIR/conf/03_route.json"
@@ -180,3 +184,82 @@ for LOCALE_TEST in C C.UTF-8; do
   )
 done
 echo 'PASS: fresh install, actual rename menu, repeated country changes, stale export state, invalid input, and locale matrix'
+
+# Execute the actual VLESS read + Clash rendering blocks, rather than reconstructing a name.
+source <(python3 - <<'BLOCKS'
+from pathlib import Path
+s = Path('sing-box.sh').read_text()
+read = s.split('  # 获取 vless + ws + tls key-value\n', 1)[1].split('  # 获取 H2 + Reality key-value', 1)[0]
+export = s.split('export_list() {', 1)[1]
+render = export.split('  if [ -n "$PORT_VLESS_WS" ]; then', 1)[1].split('  [ -n "$PORT_H2_REALITY" ]', 1)[0]
+print('render_real_vless() {')
+print(read)
+print('  if [ -n "$PORT_VLESS_WS" ]; then' + render)
+print('  printf "%s\\n" "$CLASH_SUBSCRIBE"')
+print('}')
+BLOCKS
+)
+(
+  set +u
+  text() { printf 'text-%s' "$1"; }
+  format_uri_host() { printf '%s' "$1"; }
+  NODE_TAG=(xtls-reality hysteria2 tuic ShadowTLS shadowsocks trojan vmess-ws vless-ws-tls)
+  for LOCALE_TEST in C C.UTF-8; do
+    export LC_ALL="$LOCALE_TEST"
+    reset_case
+    write_inbound '12_hysteria2_inbounds.json' '🇩🇪 94vps hysteria2'
+    cat > "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json" <<'CONFIG'
+{
+ "inbounds":[{
+ "type":"vless",
+ "tag":"🇺🇸 94vps vless-ws-tls",
+ "listen_port":8883,
+ "uuid":"00000000-0000-4000-8000-000000000000",
+ "path":"/unchanged-vless",
+ "server_name":"example.com"
+ }]
+}
+"WS_SERVER_IP_SHOW": "192.0.2.1"
+"CDN": "example.com"
+CONFIG
+    printf '{"rules":[{"inbound":["🇩🇪 94vps hysteria2","🇺🇸 94vps vless-ws-tls"]}],"unrelated":"🇺🇸 94vps"}\n' > "$WORK_DIR/conf/03_route.json"
+    printf "u: &u '🇺🇸 94vps'\n" > "$WORK_DIR/subscribe/clash"
+    for NEW in '🇩🇪 94vps' '🇯🇵Tokyo' '🇩🇪 New & Group | 42'; do
+      node_name_replace_files '🇩🇪 94vps' "$NEW"
+      for FILE in "$WORK_DIR/conf/12_hysteria2_inbounds.json" "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"; do
+        grep -Fq "\"tag\":\"$NEW " "$FILE"
+      done
+      grep -Fq "\"$NEW vless-ws-tls\"" "$WORK_DIR/conf/03_route.json"
+      grep -Fq '"unrelated":"🇺🇸 94vps"' "$WORK_DIR/conf/03_route.json"
+      grep -Fq '"path":"/unchanged-vless"' "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
+      for MODE in direct argo; do
+        STATUS[1]=direct
+        [[ "$MODE" == argo ]] && STATUS[1]="$(text 28)"
+        RESULT=$(render_real_vless)
+        grep -Fq "{name: \"$NEW vless-ws-tls\", type: vless" <<< "$RESULT"
+        if grep -Fq '🇺🇸 94vps vless-ws-tls' <<< "$RESULT"; then exit 1; fi
+      done
+    done
+  done
+)
+echo 'PASS: mixed legacy countries and names, real VLESS loading + Clash rendering (direct/Argo), exact routing references and metadata preservation'
+
+# Every installed protocol is renamed independently; malformed known tags fail before writes.
+reset_case
+I=10
+for SUFFIX in xtls-reality hysteria2 tuic ShadowTLS shadowsocks trojan vmess-ws vless-ws-tls h2-reality grpc-reality anytls naive; do
+  I=$((I+1))
+  write_inbound "${I}_${SUFFIX}_inbounds.json" "🇺🇸 legacy${I} $SUFFIX"
+done
+node_name_replace_files '🇺🇸 legacy11' '🇩🇪 94vps'
+for FILE in "$WORK_DIR"/conf/*_inbounds.json; do
+  grep -Fq '"tag":"🇩🇪 94vps ' "$FILE"
+done
+assert_json "$WORK_DIR"/conf/*_inbounds.json
+BEFORE=$(cat "$WORK_DIR/conf/11_xtls-reality_inbounds.json")
+write_inbound '22_naive_inbounds.json' 'broken tag'
+if node_name_replace_files '🇩🇪 94vps' '🇯🇵Tokyo'; then
+  echo 'FAIL: malformed known protocol tag was silently accepted'; exit 1
+fi
+assert_eq "$(cat "$WORK_DIR/conf/11_xtls-reality_inbounds.json")" "$BEFORE"
+echo 'PASS: all 12 protocol labels and malformed-tag refusal before writes'

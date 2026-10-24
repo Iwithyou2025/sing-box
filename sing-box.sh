@@ -798,14 +798,46 @@ node_name_keep_flag() {
 
 # 修改对应节点标签和引用并更新原 Clash provider 模板，其他订阅通过 export_list 重新导出。
 node_name_replace_files() {
-  local OLD_NAME="$1" NEW_NAME="$2" OLD_SED NEW_SED FILE
-  OLD_SED=$(printf '%s' "$OLD_NAME" | sed 's/[][\\.^$*|]/\\&/g')
-  NEW_SED=$(printf '%s' "$NEW_NAME" | sed 's/[\\&|]/\\&/g')
-  for FILE in "$WORK_DIR"/conf/*.json "$WORK_DIR"/subscribe/clash; do
-    [ -f "$FILE" ] || continue
-    grep -Fq -- "$OLD_NAME" "$FILE" || continue
-    sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+  local OLD_NAME="$1" NEW_NAME="$2" OLD_SED NEW_SED FILE INBOUND LABEL SUFFIX BASE QUOTE
+  local -a OLD_LABELS=() NEW_LABELS=() OLD_BASES=("$OLD_NAME")
+  # 先收集所有协议的真实旧标签。历史改名可能造成各协议名称/国旗不一致。
+  for INBOUND in "$WORK_DIR"/conf/*_inbounds.json; do
+    [ -s "$INBOUND" ] || continue
+    SUFFIX=${INBOUND##*/}
+    SUFFIX=${SUFFIX#*_}
+    SUFFIX=${SUFFIX%_inbounds.json}
+    case "$SUFFIX" in
+      xtls-reality|hysteria2|tuic|ShadowTLS|shadowsocks|trojan|vmess-ws|vless-ws-tls|h2-reality|grpc-reality|anytls|naive) ;;
+      *) continue ;;
+    esac
+    LABEL=$(grep -o '"tag"[[:space:]]*:[[:space:]]*"[^"\\]*"' "$INBOUND" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//;s/"$//')
+    [[ "$LABEL" == *" $SUFFIX" ]] || return 1
+    BASE=${LABEL%" $SUFFIX"}
+    OLD_BASES+=("$BASE")
+    OLD_LABELS+=("$LABEL")
+    NEW_LABELS+=("$NEW_NAME $SUFFIX")
   done
+  local I
+  for I in "${!OLD_LABELS[@]}"; do
+    OLD_SED=$(printf '%s' "\"${OLD_LABELS[I]}\"" | sed 's/[][\\.^$*|]/\\&/g')
+    NEW_SED=$(printf '%s' "\"${NEW_LABELS[I]}\"" | sed 's/[\\&|]/\\&/g')
+    for FILE in "$WORK_DIR"/conf/*.json; do
+      [ -f "$FILE" ] || continue
+      # 仅替换完整 JSON 字符串标签及其路由引用，不修改 UUID、路径或密钥。
+      sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+    done
+  done
+  FILE="$WORK_DIR/subscribe/clash"
+  if [ -f "$FILE" ]; then
+    for QUOTE in "'" '"'; do
+      NEW_SED=$(printf '%s' "$QUOTE$NEW_NAME$QUOTE" | sed 's/[\\&|]/\\&/g')
+      for BASE in "${OLD_BASES[@]}"; do
+        OLD_SED=$(printf '%s' "$QUOTE$BASE$QUOTE" | sed 's/[][\\.^$*|]/\\&/g')
+        sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+      done
+    done
+  fi
+  return 0
 }
 
 # 更换优选域名 / reality SNI / 节点名 / UUID
