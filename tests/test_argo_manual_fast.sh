@@ -35,10 +35,25 @@ curl() {
       *) return 1 ;;
     esac
   else
-    [[ " $* " == *" --connect-timeout 1 "* && " $* " == *" --max-time 1 "* ]] || {
-      echo "HTTPS request not capped at 1s: $*" >&2; return 1;
+    [[ " $* " == *" --connect-timeout "* && " $* " == *" --max-time "* ]] || {
+      echo "HTTPS request missing bounded timeout: $*" >&2; return 1;
     }
-    printf '%s' "$HTTP"
+    [[ " $* " != *" -L "* ]] || { echo "HTTP redirects must be terminal failures" >&2; return 1; }
+    printf 'request\n' >> "$ROOT/https-calls"
+    local COUNT
+    COUNT=$(wc -l < "$ROOT/https-calls")
+    case "${HTTPS_MODE:-code}" in
+      code) printf '%s' "$HTTP" ;;
+      dns_then_200)
+        if [ "$COUNT" -le 2 ]; then printf 000; return 6; fi
+        printf 200 ;;
+      dns_then_530)
+        if [ "$COUNT" -eq 1 ]; then printf 000; return 6; fi
+        printf 530 ;;
+      dns_timeout) printf 000; return 6 ;;
+      transfer_error) printf 200; return 28 ;;
+      *) return 1 ;;
+    esac
   fi
 }
 HTTP=200
@@ -80,6 +95,55 @@ fi
 [ "$(wc -l < "$ROOT/lookups")" -gt 1 ]
 METRICS_MODE=ready
 
+# The HTTPS stage has a separate 5s budget, and only HTTP 200 is accepted.
+reset_https() {
+  printf '0\n' > "$ROOT/fake-us"
+  : > "$ROOT/https-calls"
+}
+reset_https; HTTPS_MODE=code; HTTP=200
+argo_manual_domain_healthy new.trycloudflare.com
+[ "$(wc -l < "$ROOT/https-calls")" -eq 1 ]
+[ "$(cat "$ROOT/fake-us")" -eq 0 ]
+
+# A newly assigned hostname may initially fail DNS (curl 6/HTTP 000); retry until 200.
+reset_https; HTTPS_MODE=dns_then_200
+argo_manual_domain_healthy new.trycloudflare.com
+[ "$(wc -l < "$ROOT/https-calls")" -eq 3 ]
+[ "$(cat "$ROOT/fake-us")" -lt 5000000 ]
+
+# Any actual non-200 HTTP response is terminal, even if the response is early.
+for HTTP in 530 503 404 301 201 204; do
+  reset_https; HTTPS_MODE=code
+  if argo_manual_domain_healthy new.trycloudflare.com; then
+    echo "non-200 HTTP $HTTP was accepted" >&2; exit 1
+  fi
+  [ "$(wc -l < "$ROOT/https-calls")" -eq 1 ]
+  [ "$(cat "$ROOT/fake-us")" -eq 0 ]
+done
+
+# After one DNS failure, an HTTP 530 must abort immediately, not retry until 200.
+reset_https; HTTPS_MODE=dns_then_530
+if argo_manual_domain_healthy new.trycloudflare.com; then
+  echo 'HTTP 530 after DNS recovery was accepted' >&2; exit 1
+fi
+[ "$(wc -l < "$ROOT/https-calls")" -eq 2 ]
+[ "$(cat "$ROOT/fake-us")" -lt 5000000 ]
+
+# Repeated DNS failures stop after 5s, never publish a hostname.
+reset_https; HTTPS_MODE=dns_timeout
+if argo_manual_domain_healthy new.trycloudflare.com; then
+  echo 'DNS failures wrongly accepted' >&2; exit 1
+fi
+[ "$(cat "$ROOT/fake-us")" -eq 5000000 ]
+[ "$(wc -l < "$ROOT/https-calls")" -gt 1 ]
+
+# A 200 status with an incomplete transfer cannot be treated as a successful GET.
+reset_https; HTTPS_MODE=transfer_error
+if argo_manual_domain_healthy new.trycloudflare.com; then
+  echo 'HTTP 200 with failed transfer was accepted' >&2; exit 1
+fi
+[ "$(wc -l < "$ROOT/https-calls")" -eq 1 ]
+
 # Manual publication reuses safe exporter but never invokes monitoring wait/check routines.
 argo_monitor_wait_domain() { echo 'monitor wait mistakenly called' >&2; return 1; }
 argo_monitor_domain_healthy() { echo 'monitor health mistakenly called' >&2; return 1; }
@@ -100,4 +164,4 @@ EXPORT_OK=1
 argo_manual_publish_domain new.trycloudflare.com old.trycloudflare.com
 grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"
 grep -qx new "$WORK_DIR/conf/node.json"
-echo 'PASS: 5s hostname polling, immediate/delayed/failure, 1s HTTPS, independent monitor, rollback'
+echo 'PASS: 5s hostname/DNS polling, immediate 200, delayed DNS recovery, terminal 530/non-200, timeout, monitor isolation, rollback'
