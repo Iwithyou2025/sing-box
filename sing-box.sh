@@ -437,16 +437,16 @@ E[195]="disabled"
 C[195]="关闭"
 E[196]="Multiplexing updated and reloaded."
 C[196]="多路复用配置已更新并已热加载。"
-E[198]="Sync Argo to the latest version"
-C[198]="同步 Argo 至最新版本"
-E[199]="Argo download or validation failed; current version preserved."
-C[199]="Argo 下载或校验失败，保留当前版本。"
-E[200]="Argo failed to start; restored the previous binary."
-C[200]="Argo 启动失败，已恢复旧版核心。"
-E[201]="Argo restarted, but temporary domain/subscription refresh failed; please retry sb -n."
-C[201]="Argo 已重启，但临时域名或订阅同步失败，请重试 sb -n。"
 E[197]="Multiplexing update failed; original configurations restored."
 C[197]="多路复用更新失败，已恢复原配置。"
+E[202]="Sync Argo to the latest version"
+C[202]="同步 Argo 至最新版本"
+E[203]="Argo download or validation failed; current version preserved."
+C[203]="Argo 下载或校验失败，保留当前版本。"
+E[204]="Argo failed to start; restored the previous binary."
+C[204]="Argo 启动失败，已恢复旧版核心。"
+E[205]="Argo restarted, but temporary domain/subscription refresh failed; please retry sb -n."
+C[205]="Argo 已重启，但临时域名或订阅同步失败，请重试 sb -n。"
 
 # 自定义字体彩色，read 函数
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }  # 红色
@@ -728,29 +728,25 @@ input_uuid() {
 }
 
 input_node_name() {
-  # 输入节点名，以系统的 hostname 作为默认（新安装 / 无既有协议重新添加时询问）
-  local NODE_NAME_INPUT=''
+  # 新装、非交互安装与重新添加协议，共用 VPS 国旗；输入只决定名称文字。
+  node_country_flag_load || error " Unable to determine VPS country; retry when IP lookup is available. "
+  local NODE_NAME_INPUT='' NODE_NAME_DEFAULT
+  if command -v hostname >/dev/null 2>&1; then
+    NODE_NAME_DEFAULT=$(hostname)
+  elif [ -s /etc/hostname ]; then
+    NODE_NAME_DEFAULT=$(cat /etc/hostname)
+  else
+    NODE_NAME_DEFAULT=Sing-Box
+  fi
+  NODE_NAME_DEFAULT=$(node_name_with_flag "$NODE_NAME_DEFAULT" "$NODE_COUNTRY_FLAG") || return 1
   if [ -z "$NODE_NAME_CONFIRM" ]; then
-    local EMOJI="${EMOJI4:-$EMOJI6}"
-    local EMOJI="${EMOJI}${EMOJI:+ }"
-    if command -v hostname >/dev/null 2>&1; then
-      local NODE_NAME_DEFAULT="${EMOJI}$(hostname)"
-    elif [ -s /etc/hostname ]; then
-      local NODE_NAME_DEFAULT="${EMOJI}$(cat /etc/hostname)"
-    else
-      local NODE_NAME_DEFAULT="${EMOJI}Sing-Box"
-    fi
-    [[ "$IS_FAST_INSTALL" = 'is_fast_install' || "$NONINTERACTIVE_INSTALL" = 'noninteractive_install' ]] && NODE_NAME_CONFIRM="${NODE_NAME_DEFAULT}"
-    if [ -z "$NODE_NAME_CONFIRM" ]; then
+    if [[ "$IS_FAST_INSTALL" != 'is_fast_install' && "$NONINTERACTIVE_INSTALL" != 'noninteractive_install' ]]; then
       (( STEP_NUM++ )) || true
       reading "\n ${TOTAL_STEPS:+(${STEP_NUM}/${TOTAL_STEPS}) }$(text 13) " NODE_NAME_INPUT
     fi
-    grep -q '^$' <<< "$NODE_NAME_INPUT" && NODE_NAME_CONFIRM="$NODE_NAME_DEFAULT" || NODE_NAME_CONFIRM="${EMOJI}${NODE_NAME_INPUT}"
+    NODE_NAME_CONFIRM=${NODE_NAME_INPUT:-$NODE_NAME_DEFAULT}
   fi
-  # 首次安装保存国旗，以供离线改名复用。
-  local NODE_FLAG
-  NODE_FLAG=$(node_country_flag_from_name "$NODE_NAME_CONFIRM") || true
-  [ -n "$NODE_FLAG" ] && mkdir -p "$WORK_DIR" && printf '%s\n' "$NODE_FLAG" > "$WORK_DIR/node-country-flag"
+  NODE_NAME_CONFIRM=$(node_name_with_flag "$NODE_NAME_CONFIRM" "$NODE_COUNTRY_FLAG") || error " Invalid node name. "
 }
 
 # 判断完整的两个区域指示符（如 🇺🇸），按 UTF-8 字节判断，兼容 C / UTF-8 locale。
@@ -762,8 +758,9 @@ node_country_flag_valid() {
 
 # 从名称开头提取国旗，不使用当前名称有无汉字/数字判断。
 node_country_flag_from_name() {
-  local FIRST
-  FIRST="${1%% *}"
+  local LC_ALL=C FIRST
+  # 两个区域指示符占 8 个 UTF-8 字节，不依赖空格或当前 locale。
+  FIRST="${1:0:8}"
   if node_country_flag_valid "$FIRST"; then
     printf '%s\n' "$FIRST"
     return 0
@@ -771,48 +768,121 @@ node_country_flag_from_name() {
   return 1
 }
 
-# 国旗优先级：当前标签 > 旧的其他协议标签 > 已保存的国旗 > IP 查询结果。
-# 所有来源均缺失时不猜国家；允许用户直接输入 🇺🇸 94949。
-node_country_flag_resolve() {
-  local OLD_NAME="$1" FLAG='' FILE LABEL
-  FLAG=$(node_country_flag_from_name "$OLD_NAME") && { printf '%s\n' "$FLAG"; return 0; }
-  for FILE in "$WORK_DIR"/conf/*_inbounds.json; do
-    [ -s "$FILE" ] || continue
-    LABEL=$(sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$FILE" | head -n 1)
-    FLAG=$(node_country_flag_from_name "$LABEL") && { printf '%s\n' "$FLAG"; return 0; }
-  done
-  if [ -s "$WORK_DIR/node-country-flag" ]; then
-    FLAG=$(head -n 1 "$WORK_DIR/node-country-flag")
-    node_country_flag_valid "$FLAG" && { printf '%s\n' "$FLAG"; return 0; }
+# 国旗是 VPS 级属性，只接受系统 IP 检测结果及其缓存。
+# 旧 node-country-flag 曾由手填名称写入，不能作为 IP 归属地的可信来源。
+node_country_flag_load() {
+  local CACHE="$WORK_DIR/vps-country-flag" FLAG='' ADDRESS='' SAVED_FLAG='' SAVED_IP='' TMP
+  if [ -s "$CACHE" ]; then
+    SAVED_FLAG=$(sed -n '1p' "$CACHE")
+    SAVED_IP=$(sed -n '2p' "$CACHE")
+    if ! node_country_flag_valid "$SAVED_FLAG" || ! is_valid_server_addr "$SAVED_IP"; then
+      SAVED_FLAG='' SAVED_IP=''
+    fi
   fi
-  for FLAG in "${EMOJI4:-}" "${EMOJI6:-}"; do
-    node_country_flag_valid "$FLAG" && { printf '%s\n' "$FLAG"; return 0; }
-  done
-  return 1
+  # -d / -n 在主流程检测 IP 之前退出；在这里补一次检测。监控导出优先复用已验证缓存。
+  if [ "${SYSTEM_IP_CHECKED:-}" != 1 ] && { [ "${IS_ARGO_MONITOR:-}" != 1 ] || [ -z "$SAVED_FLAG" ]; }; then
+    check_system_ip || true
+  fi
+  if [ -n "${WAN6:-}" ] && { [ "${SERVER_IP:-}" = "$WAN6" ] || { [[ "${ASNORG4,,}" == *cloudflare* ]] && [[ "${ASNORG6,,}" != *cloudflare* ]]; }; } && node_country_flag_valid "${EMOJI6:-}"; then
+    FLAG=$EMOJI6 ADDRESS=$WAN6
+  elif [ -n "${WAN4:-}" ] && node_country_flag_valid "${EMOJI4:-}"; then
+    FLAG=$EMOJI4 ADDRESS=$WAN4
+  elif [ -n "${WAN6:-}" ] && node_country_flag_valid "${EMOJI6:-}"; then
+    FLAG=$EMOJI6 ADDRESS=$WAN6
+  fi
+  if [ -n "$FLAG" ] && is_valid_server_addr "$ADDRESS"; then
+    mkdir -p "$WORK_DIR" || return 1
+    TMP=$(mktemp "$WORK_DIR/.vps-country-flag.XXXXXX") || return 1
+    printf '%s\n%s\n' "$FLAG" "$ADDRESS" > "$TMP" && mv -f "$TMP" "$CACHE" || return 1
+  elif [ -n "$SAVED_FLAG" ] && { [[ -z "${WAN4:-}${WAN6:-}" ]] || [ "$SAVED_IP" = "${WAN4:-}" ] || [ "$SAVED_IP" = "${WAN6:-}" ]; }; then
+    FLAG=$SAVED_FLAG ADDRESS=$SAVED_IP
+  else
+    # 查不到且无可信缓存时保持已有配置，不能从某个协议或用户输入猜国家。
+    unset NODE_COUNTRY_FLAG
+    warning " Unable to determine VPS country; existing names were not changed. " >&2
+    return 1
+  fi
+  NODE_COUNTRY_FLAG=$FLAG
+  return 0
 }
 
-# 输入新国旗则尊重新国旗；仅输入新名称则沿用已有国旗。
-node_name_keep_flag() {
-  local OLD_NAME="$1" REQUESTED_NAME="$2" OLD_FLAG='' NEW_FLAG=''
-  NEW_FLAG=$(node_country_flag_from_name "$REQUESTED_NAME") && { printf '%s\n' "$REQUESTED_NAME"; return 0; }
-  OLD_FLAG=$(node_country_flag_resolve "$OLD_NAME") || true
-  if [ -n "$OLD_FLAG" ]; then
-    printf '%s %s\n' "$OLD_FLAG" "$REQUESTED_NAME"
-  else
-    printf '%s\n' "$REQUESTED_NAME"
+# 去掉历史/手填国旗后统一加 VPS 国旗。按字节剥离，兼容 C 与 UTF-8 locale。
+node_name_with_flag() {
+  local LC_ALL=C NAME="$1" FLAG="$2"
+  node_country_flag_valid "$FLAG" || return 1
+  [[ "$NAME" != *'"'* && "$NAME" != *"'"* && "$NAME" != *'\'* && ! "$NAME" =~ [[:cntrl:]] ]] || return 1
+  NAME="${NAME#"${NAME%%[! ]*}"}"
+  while node_country_flag_from_name "$NAME" >/dev/null; do
+    NAME=${NAME:8}
+    NAME="${NAME#"${NAME%%[! ]*}"}"
+  done
+  [ -n "$NAME" ] || return 1
+  printf '%s %s\n' "$FLAG" "$NAME"
+}
+
+# 生成服务端配置和所有客户端订阅时共用一个国旗，不按协议解析国家。
+node_names_apply_country() {
+  node_country_flag_load || return 1
+  local I
+  if [ -n "${NODE_NAME_CONFIRM:-}" ]; then
+    NODE_NAME_CONFIRM=$(node_name_with_flag "$NODE_NAME_CONFIRM" "$NODE_COUNTRY_FLAG") || return 1
   fi
+  for I in "${!NODE_NAME[@]}"; do
+    NODE_NAME[I]=$(node_name_with_flag "${NODE_NAME[I]}" "$NODE_COUNTRY_FLAG") || return 1
+    [ -n "${NODE_NAME_CONFIRM:-}" ] || NODE_NAME_CONFIRM=${NODE_NAME[I]}
+  done
+  return 0
 }
 
 # 修改对应节点标签和引用并更新原 Clash provider 模板，其他订阅通过 export_list 重新导出。
 node_name_replace_files() {
-  local OLD_NAME="$1" NEW_NAME="$2" OLD_SED NEW_SED FILE
-  OLD_SED=$(printf '%s' "$OLD_NAME" | sed 's/[][\\.^$*|]/\\&/g')
-  NEW_SED=$(printf '%s' "$NEW_NAME" | sed 's/[\\&|]/\\&/g')
-  for FILE in "$WORK_DIR"/conf/*.json "$WORK_DIR"/subscribe/clash; do
-    [ -f "$FILE" ] || continue
-    grep -Fq -- "$OLD_NAME" "$FILE" || continue
-    sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+  local OLD_NAME="$1" NEW_NAME="$2" MODE="${3:-name}" OLD_SED NEW_SED FILE INBOUND LABEL SUFFIX BASE QUOTE NEW_BASE
+  local -a OLD_LABELS=() NEW_LABELS=() OLD_BASES=("$OLD_NAME")
+  # 先收集所有协议的真实旧标签。历史改名可能造成各协议名称/国旗不一致。
+  for INBOUND in "$WORK_DIR"/conf/*_inbounds.json; do
+    [ -s "$INBOUND" ] || continue
+    SUFFIX=${INBOUND##*/}
+    SUFFIX=${SUFFIX#*_}
+    SUFFIX=${SUFFIX%_inbounds.json}
+    case "$SUFFIX" in
+      xtls-reality|hysteria2|tuic|ShadowTLS|shadowsocks|trojan|vmess-ws|vless-ws-tls|h2-reality|grpc-reality|anytls|naive) ;;
+      *) continue ;;
+    esac
+    LABEL=$(grep -o '"tag"[[:space:]]*:[[:space:]]*"[^"\\]*"' "$INBOUND" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//;s/"$//')
+    [[ "$LABEL" == *" $SUFFIX" ]] || return 1
+    BASE=${LABEL%" $SUFFIX"}
+    OLD_BASES+=("$BASE")
+    OLD_LABELS+=("$LABEL")
+    NEW_BASE=$NEW_NAME
+    [ "$MODE" = country ] && NEW_BASE=$(node_name_with_flag "$BASE" "$NODE_COUNTRY_FLAG")
+    [ -n "$NEW_BASE" ] || return 1
+    NEW_LABELS+=("$NEW_BASE $SUFFIX")
   done
+  local I
+  for I in "${!OLD_LABELS[@]}"; do
+    OLD_SED=$(printf '%s' "\"${OLD_LABELS[I]}\"" | sed 's/[][\\.^$*|]/\\&/g')
+    NEW_SED=$(printf '%s' "\"${NEW_LABELS[I]}\"" | sed 's/[\\&|]/\\&/g')
+    for FILE in "$WORK_DIR"/conf/*.json; do
+      [ -f "$FILE" ] || continue
+      # 仅替换完整 JSON 字符串标签及其路由引用，不修改 UUID、路径或密钥。
+      sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+    done
+  done
+  FILE="$WORK_DIR/subscribe/clash"
+  if [ -f "$FILE" ]; then
+    for QUOTE in "'" '"'; do
+      for BASE in "${OLD_BASES[@]}"; do
+        [ -n "$BASE" ] || continue
+        NEW_BASE=$NEW_NAME
+        [ "$MODE" = country ] && NEW_BASE=$(node_name_with_flag "$BASE" "$NODE_COUNTRY_FLAG")
+        [ -n "$NEW_BASE" ] || return 1
+        NEW_SED=$(printf '%s' "$QUOTE$NEW_BASE$QUOTE" | sed 's/[\\&|]/\\&/g')
+        OLD_SED=$(printf '%s' "$QUOTE$BASE$QUOTE" | sed 's/[][\\.^$*|]/\\&/g')
+        sed -i "s|${OLD_SED}|${NEW_SED}|g" "$FILE" || return 1
+      done
+    done
+  fi
+  return 0
 }
 
 # 更换优选域名 / reality SNI / 节点名 / UUID
@@ -820,6 +890,7 @@ change_config() {
   [ ! -d "${WORK_DIR}" ] && error " $(text 107) "
 
   local MENU_IDX=() MENU_KEY=() MENU_VAL=()
+  local NEW_VAL=''
 
   # 优选 CDN
   ls ${WORK_DIR}/conf/*-ws*inbounds.json >/dev/null 2>&1 && local CDN_NOW=$(awk -F '"' '/"CDN"/{print $4; exit}' ${WORK_DIR}/conf/*-ws*inbounds.json) && MENU_IDX+=(128) && MENU_KEY+=(cdn) && MENU_VAL+=("$CDN_NOW")
@@ -1173,18 +1244,16 @@ change_config() {
     is_valid_server_addr "$NEW_VAL" || error " $(text 133) "
   fi
 
-  # 节点改名保留旧国旗；用户主动输入国旗则使用新国旗。
+  # 所有协议使用同一个 VPS 国旗；改名只修改名称文字。
   if [ "$KEY" = "name" ]; then
-    NEW_VAL=$(node_name_keep_flag "$OLD" "$NEW_VAL")
-    if [[ "$NEW_VAL" == *'"'* || "$NEW_VAL" == *'\'* || "$NEW_VAL" == *$'\n'* || "$NEW_VAL" == *"'"* ]]; then
-      warning " Invalid node name: quotes, backslashes and newlines are not supported. "
+    node_country_flag_load || return 1
+    NEW_VAL=$(node_name_with_flag "$NEW_VAL" "$NODE_COUNTRY_FLAG") || {
+      warning " Invalid node name: provide text without quotes, backslashes or control characters. "
       return 1
-    fi
+    }
     node_name_replace_files "$OLD" "$NEW_VAL" || return 1
-    local NODE_FLAG
-    NODE_FLAG=$(node_country_flag_from_name "$NEW_VAL") || true
-    [ -n "$NODE_FLAG" ] && printf '%s\n' "$NODE_FLAG" > "$WORK_DIR/node-country-flag"
-    cmd_systemctl reload sing-box
+    NODE_NAME_CONFIRM="$NEW_VAL"
+    cmd_systemctl reload sing-box || return 1
     export_list
     return
   fi
@@ -2792,8 +2861,15 @@ check_port_hopping_nat() {
   [ -n "$PORT_HOPPING_START" ] && [ -n "$PORT_HOPPING_END" ] && HY2_PORT_HOPPING_RANGE="${PORT_HOPPING_START}:${PORT_HOPPING_END}"
 }
 
+# IP 检测响应可以是紧凑或多行 JSON；不依赖字段排版。
+system_ip_field() {
+  sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -n 1
+}
+
 # 检测 IPv4 IPv6 信息
 check_system_ip() {
+  SYSTEM_IP_CHECKED=1
+  unset WAN4 WAN6 EMOJI4 EMOJI6 COUNTRY4 COUNTRY6 ASNORG4 ASNORG6
   [ "$L" = 'C' ] && local IS_CHINESE='?lang=zh-CN'
   local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
   local DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
@@ -2807,31 +2883,32 @@ check_system_ip() {
   # 并行检测 IPv4 和 IPv6 信息
   {
     local CHECK_IP4=$(wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 https://ip.cloudflare.now.cc${IS_CHINESE})
-    grep -q '.' <<< "$CHECK_IP4" && echo "$CHECK_IP4" > $TEMP_DIR/ip4.json
+    printf '%s\n' "$CHECK_IP4" > "$TEMP_DIR/ip4.json"
   }&
 
   {
     local CHECK_IP6=$(wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=2 --timeout=2 https://ip.cloudflare.now.cc${IS_CHINESE})
-    grep -q '.' <<< "$CHECK_IP6" && echo "$CHECK_IP6" > $TEMP_DIR/ip6.json
+    printf '%s\n' "$CHECK_IP6" > "$TEMP_DIR/ip6.json"
   }&
 
   wait
 
   [ -s $TEMP_DIR/ip4.json ] &&
   local IP4_JSON=$(cat $TEMP_DIR/ip4.json) &&
-  WAN4=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP4_JSON") &&
-  COUNTRY4=$(awk -F '"' '/"country"/{print $4}' <<< "$IP4_JSON") &&
-  EMOJI4=$(awk -F '"' '/"emoji"/{print $4}' <<< "$IP4_JSON") &&
-  ASNORG4=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP4_JSON") &&
+  WAN4=$(system_ip_field ip <<< "$IP4_JSON") &&
+  COUNTRY4=$(system_ip_field country <<< "$IP4_JSON") &&
+  EMOJI4=$(system_ip_field emoji <<< "$IP4_JSON") &&
+  ASNORG4=$(system_ip_field isp <<< "$IP4_JSON") &&
   rm -f $TEMP_DIR/ip4.json
 
   [ -s $TEMP_DIR/ip6.json ] &&
   local IP6_JSON=$(cat $TEMP_DIR/ip6.json) &&
-  WAN6=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP6_JSON") &&
-  COUNTRY6=$(awk -F '"' '/"country"/{print $4}' <<< "$IP6_JSON") &&
-  EMOJI6=$(awk -F '"' '/"emoji"/{print $4}' <<< "$IP6_JSON") &&
-  ASNORG6=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP6_JSON") &&
+  WAN6=$(system_ip_field ip <<< "$IP6_JSON") &&
+  COUNTRY6=$(system_ip_field country <<< "$IP6_JSON") &&
+  EMOJI6=$(system_ip_field emoji <<< "$IP6_JSON") &&
+  ASNORG6=$(system_ip_field isp <<< "$IP6_JSON") &&
   rm -f $TEMP_DIR/ip6.json
+  return 0
 }
 
 # 输入起始 port 函数
@@ -4664,6 +4741,9 @@ EOF
 
 # 生成 sing-box 配置文件
 sing-box_json() {
+  node_names_apply_country || error " Unable to prepare VPS node names. "
+  # 重建旧配置前同步全局国旗及路由引用，避免新标签与旧规则失配。
+  node_name_replace_files "${NODE_NAME_CONFIRM:-}" '' country || error " Unable to update node country references. "
   local IS_CHANGE=$1
   mkdir -p ${WORK_DIR}/conf ${WORK_DIR}/logs ${WORK_DIR}/subscribe
 
@@ -5450,7 +5530,9 @@ fetch_nodes_value() {
   [[ -z "$NODE_NAME_CONFIRM" && -s ${WORK_DIR}/subscribe/clash ]] && NODE_NAME_CONFIRM=$(awk -F "'" '/u: &u/{print $2; exit}' ${WORK_DIR}/subscribe/clash)
 
   # 如有 Argo，获取 Argo Tunnel
-  argo_refresh_domain_for_export
+  if [ "${ARGO_UPDATE_PRESERVE_SERVICE_STATE:-0}" != 1 ]; then
+  [[ ${STATUS[1]} =~ $(text 27)|$(text 28) ]] && grep -q '\--url' ${ARGO_DAEMON_FILE} && { cmd_systemctl enable argo; sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain; }
+  fi
 
   # 获取 UUID_CONFIRM（从 JSON 配置文件读取，不依赖 nginx）
   # 如 UUID_CONFIRM 已有值（例如上层已交互输入），跳过 JSON 读取，避免重复弹窗
@@ -5883,6 +5965,7 @@ export_list() {
   check_install
 
   [ "$IS_INSTALL" != 'install' ] && fetch_nodes_value
+  node_names_apply_country || return 1
 
   # IPv6 时的 IP 处理
   if [[ "$SERVER_IP" =~ : ]]; then
@@ -7108,16 +7191,6 @@ download_cloudflared() {
   return 1
 }
 
-# 导出节点时刷新 Quick Tunnel 域名；普通导出维持原有的启动行为。
-# 更新流程已经主动刷新过域名，此时必须跳过 enable --now，避免改变开机自启状态。
-argo_refresh_domain_for_export() {
-  [[ ${STATUS[1]} =~ $(text 27)|$(text 28) ]] || return 0
-  grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
-  [ "${ARGO_UPDATE_PRESERVE_SERVICE_STATE:-0}" = 1 ] && return 0
-  cmd_systemctl enable argo
-  sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain
-}
-
 # 更新或回退后的 Quick Tunnel 都可能更换域名，共用现有同步逻辑。
 argo_update_refresh_domain() {
   grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
@@ -7126,7 +7199,7 @@ argo_update_refresh_domain() {
     ARGO_UPDATE_PRESERVE_SERVICE_STATE=1
     fetch_quicktunnel_domain && export_list
   ) || {
-    warning " $(text 201) "
+    warning " $(text 205) "
     return 1
   }
 }
@@ -7143,7 +7216,7 @@ argo_version() {
   check_arch
   CANDIDATE=$(mktemp "$WORK_DIR/.cloudflared-update.XXXXXX") || return 1
   if ! download_cloudflared "$CANDIDATE"; then
-    warning " $(text 199) "
+    warning " $(text 203) "
     return 1
   fi
   LOCAL=$("$WORK_DIR/cloudflared" --version 2>/dev/null | awk '{print $3}')
@@ -7175,7 +7248,7 @@ argo_version() {
     fi
     if [ "$RUNNING" = 2 ]; then
       mv -f "$BACKUP" "$WORK_DIR/cloudflared" || { warning " Argo $(text 38): $BACKUP "; return 1; }
-      warning " $(text 200) "
+      warning " $(text 204) "
       if cmd_systemctl restart argo; then
         sleep 2
         if cmd_systemctl status argo &>/dev/null; then
@@ -7288,7 +7361,7 @@ menu_setting() {
     OPTION[4]="4 .  $(text 92)"
     OPTION[5]="5 .  $(text 121)"
     OPTION[6]="6 .  $(text 31)"
-    OPTION[7]="7 .  $(text 198)"
+    OPTION[7]="7 .  $(text 202)"
     OPTION[8]="8 .  $(text 32)"
     OPTION[9]="9 .  $(text 62)"
     OPTION[10]="10.  $(text 33)"

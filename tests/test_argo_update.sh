@@ -14,7 +14,11 @@ reading() { printf -v "$2" '%s' "$ANSWER"; }
 fetch_quicktunnel_domain() { echo domain >> "$EVENTS"; [ "$DOMAIN_FAIL" != 1 ]; }
 export_list() {
   echo export >> "$EVENTS"
-  argo_refresh_domain_for_export
+  # Simulate the prior subscription-export side effect; the updater must guard it.
+  if [ "${ARGO_UPDATE_PRESERVE_SERVICE_STATE:-0}" != 1 ] &&
+     grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
+    cmd_systemctl enable argo
+  fi
 }
 cmd_systemctl() {
   echo "$*" >> "$EVENTS"
