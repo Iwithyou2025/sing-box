@@ -55,7 +55,7 @@ printf '{"outbounds":[]}\n' > "$OUT/sing-box"
 # Inject a failure halfway through live renames. Every previously published file must be restored.
 (
   mv() {
-    if [[ "$2" == "$WORK_DIR/subscribe/clash2" ]]; then return 1; fi
+    if [[ "${3:-}" == "$WORK_DIR/subscribe/clash2" ]]; then return 1; fi
     command mv "$@"
   }
   if subscription_publish "$OUT" "$STAGE"; then echo 'publish failure undetected' >&2; exit 1; fi
