@@ -17,6 +17,14 @@ mkdir -p "$WORK_DIR/conf"
 printf 'old.trycloudflare.com\n' > "$WORK_DIR/argo-domain"
 printf 'old\n' > "$WORK_DIR/conf/node.json"
 info() { :; }; warning() { :; }
+# Mock the dual-stack VPS and IPv6-only fallback for curl address-family choice.
+ip() {
+  case "$1" in
+    -4) [ "${IP_MODE:-ipv4}" = ipv4 ];;
+    -6) [ "${IP_MODE:-ipv4}" = ipv6 ];;
+    *) return 1 ;;
+  esac
+}
 ps() { echo "1234 $WORK_DIR/cloudflared tunnel --url http://localhost:8000"; }
 ss() { echo 'LISTEN 0 128 127.0.0.1:12345 0.0.0.0:* users:(("cloudflared",pid=1234,fd=7))'; }
 curl() {
@@ -35,10 +43,20 @@ curl() {
       *) return 1 ;;
     esac
   else
-    [[ " $* " == *" --connect-timeout "* && " $* " == *" --max-time "* ]] || {
-      echo "HTTPS request missing bounded timeout: $*" >&2; return 1;
+    [[ " $* " == *" --noproxy * "* && " $* " == *" --connect-timeout "* && " $* " == *" --max-time "* ]] || {
+      echo "HTTPS request must bypass proxies and have a bounded timeout: $*" >&2; return 1;
     }
+    if [ "${IP_MODE:-ipv4}" = ipv4 ]; then
+      [[ " $* " == *" -4 "* ]] || { echo "IPv4 VPS must use curl -4" >&2; return 1; }
+    else
+      [[ " $* " == *" -6 "* ]] || { echo "IPv6-only VPS must use curl -6" >&2; return 1; }
+    fi
     [[ " $* " != *" -L "* ]] || { echo "HTTP redirects must be terminal failures" >&2; return 1; }
+    # Fresh TLS connections get up to 3 seconds, but the outer deadline stays 5 seconds.
+    if [ "$(cat "$ROOT/fake-us" 2>/dev/null || echo 0)" -eq 0 ]; then
+      [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 3 "* ]] ||
+        { echo "First HTTPS request must allow 3 seconds: $*" >&2; return 1; }
+    fi
     printf 'request\n' >> "$ROOT/https-calls"
     local COUNT
     COUNT=$(wc -l < "$ROOT/https-calls")
@@ -101,9 +119,15 @@ reset_https() {
   : > "$ROOT/https-calls"
 }
 reset_https; HTTPS_MODE=code; HTTP=200
+IP_MODE=ipv4
 argo_manual_domain_healthy new.trycloudflare.com
 [ "$(wc -l < "$ROOT/https-calls")" -eq 1 ]
 [ "$(cat "$ROOT/fake-us")" -eq 0 ]
+# IPv6-only servers still validate via IPv6, rather than blindly requiring IPv4.
+reset_https; IP_MODE=ipv6
+argo_manual_domain_healthy new.trycloudflare.com
+[ "$(wc -l < "$ROOT/https-calls")" -eq 1 ]
+IP_MODE=ipv4
 
 # A newly assigned hostname may initially fail DNS (curl 6/HTTP 000); retry until 200.
 reset_https; HTTPS_MODE=dns_then_200
