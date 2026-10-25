@@ -68,6 +68,12 @@ reset_case
 printf 'ExecStart=unrecognized\n' > "$ARGO_DAEMON_FILE"
 if change_argo; then echo 'unknown type incorrectly accepted' >&2; exit 1; fi
 [ ! -s "$EVENTS" ]
+# A temporary tunnel started without a running daemon must not be reported as rebuilt.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --url http://localhost:8080\\n' > "$ARGO_DAEMON_FILE"
+ACTIVE=0
+if change_argo; then echo 'stopped Try tunnel incorrectly reported rebuilt' >&2; exit 1; fi
+! grep -qx 'cmd restart argo' "$EVENTS"
 # Invalid token must be rejected before touching the unit.
 reset_case
 printf 'ExecStart=/etc/sing-box/cloudflared tunnel --token old\n' > "$ARGO_DAEMON_FILE"
