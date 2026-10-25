@@ -7,7 +7,7 @@ VERSION='v1.3.27 (2026.10.18)'
 GITHUB_PROXY=('https://ghproxy.lvedong.eu.org/' 'https://accel.cloudflare.nyc.mn/')
 
 # 各变量默认值
-TEMP_DIR='/tmp/sing-box'
+TEMP_DIR=$(mktemp -d /tmp/sing-box.XXXXXXXX) || exit 1
 WORK_DIR='/etc/sing-box'
 FIREWALL_STATE_DIR="${WORK_DIR}/firewall"
 SERVICE_FIREWALL_STATE_FILE="${FIREWALL_STATE_DIR}/service_ports.list"
@@ -2270,6 +2270,49 @@ argo_change_type() {
   esac
 }
 
+# One-shot Quick Tunnel hostname retrieval for MANUAL switching only.
+argo_manual_live_domain() {
+  local PID ADDR HOST
+  PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
+  [[ "$PID" =~ ^[0-9]+$ ]] || return 1
+  ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
+  [ -n "$ADDR" ] || return 1
+  HOST=$(wget -qO- --timeout=1 --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}') || return 1
+  [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  printf '%s\n' "$HOST"
+}
+
+# One HTTPS GET, single attempt, 1s total timeout; retain original curl diagnostics.
+argo_manual_domain_healthy() {
+  local DOMAIN="$1" CODE RC
+  command -v curl >/dev/null 2>&1 || { warning " curl is missing "; return 1; }
+  CODE=$(curl -sS -L --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    warning " HTTPS request failed: curl exit $RC "
+    return 1
+  fi
+  [[ "$CODE" =~ ^2[0-9][0-9]$ ]] || { warning " HTTPS returned HTTP $CODE "; return 1; }
+  info " HTTPS $CODE "
+}
+
+# Only reuse subscription publication; do not invoke the monitor's wait/health/rebuild path.
+argo_manual_publish_domain() {
+  local NEW="$1" OLD="$2" SNAPSHOT
+  SNAPSHOT=$(mktemp -d "$WORK_DIR/.argo-manual-publish.XXXXXXXX") || return 1
+  [ -f "$WORK_DIR/argo-domain" ] && cp -p "$WORK_DIR/argo-domain" "$SNAPSHOT/argo-domain"
+  cp -a "$WORK_DIR/conf" "$SNAPSHOT/conf" || { rm -rf "$SNAPSHOT"; return 1; }
+  if (ARGO_MONITOR_VERIFIED_DOMAIN="$NEW"; fetch_quicktunnel_domain && export_list >/dev/null); then
+    rm -rf "$SNAPSHOT"
+    return 0
+  fi
+  [ -f "$SNAPSHOT/argo-domain" ] && cp -p "$SNAPSHOT/argo-domain" "$WORK_DIR/argo-domain" || rm -f "$WORK_DIR/argo-domain"
+  cp -a "$SNAPSHOT/conf/." "$WORK_DIR/conf/"
+  rm -rf "$SNAPSHOT"
+  warning " Subscription update failed; previous domain references restored. "
+  return 1
+}
+
 # 供手动操作和自动监控共用的互斥标记。
 argo_change_lock() {
   local PID
@@ -2344,10 +2387,20 @@ argo_change_run() (
   }
 
   if [ "$TYPE" = Try ]; then
-    cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1 || return 1
-    LIVE=$(argo_monitor_wait_domain) || { warning " No Quick Tunnel hostname after restart. "; return 1; }
-    ARGO_CHANGE_ALLOW_PUBLISH=1 ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_monitor_publish_domain "$LIVE" "$OLD_DOMAIN"
-    return $?
+    info " Restarting Argo... "
+    cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1 || return 1
+    LIVE=$(argo_manual_live_domain) || {
+      warning " Quick Tunnel hostname not ready (single 1-second request); subscriptions unchanged. "
+      return 1
+    }
+    info " New Argo domain: $LIVE "
+    argo_manual_domain_healthy "$LIVE" || {
+      warning " Quick Tunnel HTTPS single 1-second check failed; subscriptions unchanged. "
+      return 1
+    }
+    ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
+    info " Argo changed and subscriptions updated. "
+    return 0
   fi
   if [ "$ACTION" = reconnect ]; then
     cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1
