@@ -3,16 +3,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source <(sed -n \
+  -e '/^argo_manual_publish_domain() {/,/^}/p' \
   -e '/^argo_monitor_live_domain() {/,/^}/p' \
   -e '/^argo_monitor_domain_healthy() {/,/^}/p' \
   -e '/^argo_monitor_wait_domain() {/,/^}/p' \
   -e '/^argo_monitor_publish_domain() {/,/^}/p' \
+  -e '/^argo_monitor_code_refresh() {/,/^}/p' \
   -e '/^argo_monitor_loop() {/,/^}/p' sing-box.sh)
 
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 ARGO_DAEMON_FILE="$WORK_DIR/argo.service"
+mkdir -p "$WORK_DIR/conf"
+ARGO_MONITOR_NEXT_CODE_CHECK=0
+SB_RUNNING_SCRIPT_SHA=''
 SYSTEM=Ubuntu
+warning() { :; }
 printf 'ExecStart=/etc/sing-box/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
 
 # Mock executable/process/services; all state isolated under WORK_DIR.
@@ -35,8 +41,12 @@ cmd_systemctl() {
 fetch_quicktunnel_domain() {
   [[ "$ARGO_MONITOR_VERIFIED_DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   printf '%s\n' "$ARGO_MONITOR_VERIFIED_DOMAIN" > "$WORK_DIR/argo-domain"
+  printf 'current=%s\n' "$ARGO_MONITOR_VERIFIED_DOMAIN" > "$WORK_DIR/conf/ws.json"
 }
-export_list() { printf 'export\n' >> "$WORK_DIR/exports"; }
+export_list() {
+  printf 'export\n' >> "$WORK_DIR/exports"
+  [ ! -e "$WORK_DIR/export_fail" ]
+}
 sleep() {
   if [ "$1" = 54 ]; then
     local T
@@ -48,9 +58,10 @@ sleep() {
   return 0
 }
 new_case() {
-  rm -f "$WORK_DIR"/ticks "$WORK_DIR"/exports "$WORK_DIR"/restarts "$WORK_DIR"/argo-monitor.last "$WORK_DIR"/argo-monitor.attempts
+  rm -f "$WORK_DIR"/ticks "$WORK_DIR"/exports "$WORK_DIR"/restarts "$WORK_DIR"/argo-monitor.last "$WORK_DIR"/argo-monitor.attempts "$WORK_DIR"/export_fail
   echo 2 > "$WORK_DIR/tick_limit"
   echo old-value.trycloudflare.com > "$WORK_DIR/argo-domain"
+  echo 'current=old-value.trycloudflare.com' > "$WORK_DIR/conf/ws.json"
   echo old-value.trycloudflare.com > "$WORK_DIR/live"
   echo new-value.trycloudflare.com > "$WORK_DIR/recovery_domain"
   : > "$WORK_DIR/bad_http"
@@ -112,5 +123,18 @@ echo "$(( $(date +%s) - 601 ))" > "$WORK_DIR/argo-monitor.last"
 run_monitor
 grep -q 'restarting Argo (1/10)' "$WORK_DIR/output.log"
 assert_count "$WORK_DIR/restarts" 1
+
+# 6) Export failure must restore BOTH the domain pointer and WS configuration,
+# leaving the originally published subscription untouched.
+new_case
+touch "$WORK_DIR/export_fail"
+echo new-value.trycloudflare.com > "$WORK_DIR/live"
+printf 'original subscription\n' > "$WORK_DIR/subscribe-original"
+run_monitor
+grep -q 'subscription refresh failed' "$WORK_DIR/output.log"
+test "$(cat "$WORK_DIR/argo-domain")" = old-value.trycloudflare.com
+grep -qx 'current=old-value.trycloudflare.com' "$WORK_DIR/conf/ws.json"
+grep -qx 'original subscription' "$WORK_DIR/subscribe-original"
+assert_count "$WORK_DIR/exports" 2
 
 echo 'PASS: Argo Quick Tunnel mock health, sync, rebuild and cooldown tests'

@@ -113,7 +113,7 @@ fi
 [ "$(wc -l < "$ROOT/lookups")" -gt 1 ]
 METRICS_MODE=ready
 
-# The HTTPS stage has a separate 5s budget, and only HTTP 200 is accepted.
+# The HTTPS stage has a separate 10s budget, and only HTTP 200 is accepted.
 reset_https() {
   printf '0\n' > "$ROOT/fake-us"
   : > "$ROOT/https-calls"
@@ -153,12 +153,12 @@ fi
 [ "$(wc -l < "$ROOT/https-calls")" -eq 2 ]
 [ "$(cat "$ROOT/fake-us")" -lt 5000000 ]
 
-# Repeated DNS failures stop after 5s, never publish a hostname.
+# Repeated DNS failures stop after 10s, never publish a hostname.
 reset_https; HTTPS_MODE=dns_timeout
 if argo_manual_domain_healthy new.trycloudflare.com; then
-  echo 'DNS failures wrongly accepted' >&2; exit 1
+  echo 'DNS failures wrongly accepted within 10s' >&2; exit 1
 fi
-[ "$(cat "$ROOT/fake-us")" -eq 5000000 ]
+[ "$(cat "$ROOT/fake-us")" -eq 10000000 ]
 [ "$(wc -l < "$ROOT/https-calls")" -gt 1 ]
 
 # A 200 status with an incomplete transfer cannot be treated as a successful GET.
@@ -188,4 +188,4 @@ EXPORT_OK=1
 argo_manual_publish_domain new.trycloudflare.com old.trycloudflare.com
 grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"
 grep -qx new "$WORK_DIR/conf/node.json"
-echo 'PASS: 5s hostname/DNS polling, immediate 200, delayed DNS recovery, terminal 530/non-200, timeout, monitor isolation, rollback'
+echo 'PASS: 5s hostname, 10s HTTPS/DNS polling, immediate 200, delayed DNS recovery, terminal 530/non-200, monitor isolation, rollback'

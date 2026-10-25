@@ -14,6 +14,7 @@ on:
       - 'tests/test_argo_change_mode.sh'
       - 'tests/test_argo_manual_fast.sh'
       - 'tests/test_subscription_safety.sh'
+      - 'tests/test_argo_monitor_code_refresh.sh'
   workflow_dispatch:
 
 jobs:
@@ -58,6 +59,10 @@ jobs:
       - name: One-second manual Argo path regression
         shell: bash
         run: bash tests/test_argo_manual_fast.sh
+
+      - name: Monitor live script version change and launcher integrity
+        shell: bash
+        run: bash tests/test_argo_monitor_code_refresh.sh
 
       - name: Safe subscription transaction and empty-template regression
         shell: bash
