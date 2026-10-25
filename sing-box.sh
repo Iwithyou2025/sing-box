@@ -6030,7 +6030,7 @@ argo_monitor_publish_domain() {
     return 1
   fi
   if ! argo_monitor_domain_healthy "$CANDIDATE"; then
-    printf '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n' "$CANDIDATE"
+    printf "$(i18n_message '[argo-monitor] 警告：新域名未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n')" "$CANDIDATE"
     return 1
   fi
   # Reuse manual switching's snapshot/rollback: the domain pointer AND WS conf
@@ -6038,10 +6038,10 @@ argo_monitor_publish_domain() {
   # Auto monitor never restarts Argo during this publication.
   if ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$CANDIDATE" "$PREVIOUS" &&
        [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$CANDIDATE" ]; then
-    printf '[argo-monitor] completed: HTTP verified; subscriptions updated: %s\n' "$CANDIDATE"
+    printf "$(i18n_message '[argo-monitor] 已完成：HTTP 验证通过，订阅已同步：%s\n' '[argo-monitor] completed: HTTP verified; subscriptions updated: %s\n')" "$CANDIDATE"
     return 0
   fi
-  printf '[argo-monitor] WARNING: subscription refresh failed for %s\n' "$CANDIDATE"
+  printf "$(i18n_message '[argo-monitor] 警告：订阅刷新失败：%s\n' '[argo-monitor] WARNING: subscription refresh failed for %s\n')" "$CANDIDATE"
   return 1
 }
 
@@ -6065,7 +6065,7 @@ argo_monitor_code_refresh() {
   HASH=$(sha256sum "$TMP" | awk '{print $1}')
   rm -f "$TMP"
   [ -n "$HASH" ] && [ "$HASH" != "$SB_RUNNING_SCRIPT_SHA" ] || return 0
-  printf '[argo-monitor] new script version detected; refreshing monitor only (Argo unchanged)\n'
+  printf "$(i18n_message '[argo-monitor] 检测到新版脚本，仅重新加载监控进程（Argo 隧道不变）\n' '[argo-monitor] new script version detected; refreshing monitor only (Argo unchanged)\n')"
   if [ "$SYSTEM" = Alpine ]; then
     # OpenRC restarts the launcher, which downloads the new script.
     rc-service argo-monitor restart >/dev/null 2>&1 && return 2
@@ -6073,7 +6073,7 @@ argo_monitor_code_refresh() {
     # Avoid blocking on stopping this very same process.
     systemctl --no-block restart argo-monitor.service >/dev/null 2>&1 && return 2
   fi
-  echo '[argo-monitor] WARNING: failed to schedule monitor code refresh; will retry'
+  echo "$(i18n_message '[argo-monitor] 警告：无法安排监控代码刷新，将重试' '[argo-monitor] WARNING: failed to schedule monitor code refresh; will retry')"
   ARGO_MONITOR_NEXT_CODE_CHECK=0
   return 0
 }
@@ -6103,7 +6103,7 @@ argo_monitor_loop() {
     LIVE_DOMAIN=$(argo_monitor_live_domain || true)
     if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
        argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
-      printf '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n' "$DOMAIN" "$LIVE_DOMAIN"
+      printf "$(i18n_message '[argo-monitor] 域名变化：%s -> %s；正在同步订阅（不重启 Argo）\n' '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n')" "$DOMAIN" "$LIVE_DOMAIN"
       argo_monitor_publish_domain "$LIVE_DOMAIN" "$DOMAIN" || true
       FAILURES=0
       continue
@@ -6127,7 +6127,7 @@ argo_monitor_loop() {
       ATTEMPTS=0
     fi
     if [ "$ATTEMPTS" -ge 10 ]; then
-      printf '[argo-monitor] 10 rebuild attempts reached; cooldown %ss remaining\n' "$((600 - NOW + LAST))"
+      printf "$(i18n_message '[argo-monitor] 已重建 10 次，剩余冷却时间 %s 秒\n' '[argo-monitor] 10 rebuild attempts reached; cooldown %ss remaining\n')" "$((600 - NOW + LAST))"
       continue
     fi
 
@@ -6135,16 +6135,16 @@ argo_monitor_loop() {
     ((ATTEMPTS+=1))
     printf '%s\n' "$ATTEMPTS" > "$WORK_DIR/argo-monitor.attempts"
     printf '%s\n' "$NOW" > "$WORK_DIR/argo-monitor.last"
-    printf '[argo-monitor] %s failed 2 times; restarting Argo (%s/10)\n' "$DOMAIN" "$ATTEMPTS"
+    printf "$(i18n_message '[argo-monitor] %s 连续检查失败 2 次；正在重启 Argo（第 %s/10 次）\n' '[argo-monitor] %s failed 2 times; restarting Argo (%s/10)\n')" "$DOMAIN" "$ATTEMPTS"
     FAILURES=0
 
     [ -d "$WORK_DIR/.argo-change.lock" ] && continue
     if ! cmd_systemctl restart argo || ! cmd_systemctl status argo >/dev/null 2>&1; then
-      echo '[argo-monitor] WARNING: Argo restart failed'
+      echo "$(i18n_message '[argo-monitor] 警告：Argo 重启失败' '[argo-monitor] WARNING: Argo restart failed')"
       continue
     fi
     if ! NEW_DOMAIN=$(argo_monitor_wait_domain); then
-      echo '[argo-monitor] WARNING: timed out waiting for new domain (10s)'
+      echo "$(i18n_message '[argo-monitor] 警告：等待新域名超时（10 秒）' '[argo-monitor] WARNING: timed out waiting for new domain (10s)')"
       continue
     fi
     # 验证候选域名后才写配置和订阅；失败则下一轮继续检测。
@@ -6244,10 +6244,10 @@ subscription_prepare_templates() {
     else
       [ "$name" = sing-box-template ] && url=sing-box || url=$name
       wget --no-check-certificate --tries=1 --timeout=6 -qO "$dest" "${GH_PROXY}${SUBSCRIBE_TEMPLATE}/$url" 2>/dev/null || {
-        printf '[subscription] download failed: %s\n' "$name" >&2; return 1;
+        printf "$(i18n_message '[subscription] 下载失败：%s\n' '[subscription] download failed: %s\n')" "$name" >&2; return 1;
       }
     fi
-    subscription_template_valid "$name" "$dest" || { printf '[subscription] invalid template: %s\n' "$name" >&2; return 1; }
+    subscription_template_valid "$name" "$dest" || { printf "$(i18n_message '[subscription] 模板无效：%s\n' '[subscription] invalid template: %s\n')" "$name" >&2; return 1; }
     if ! subscription_template_valid "$name" "$cache/$name"; then cp "$dest" "$cache/$name" || return 1; fi
   done
 }
@@ -6255,7 +6255,7 @@ subscription_prepare_templates() {
 subscription_lock_acquire() {
   exec {SUBSCRIPTION_LOCK_FD}>"$WORK_DIR/.subscription-export.lock" || return 1
   if ! flock -w 15 "$SUBSCRIPTION_LOCK_FD"; then
-    echo '[subscription] another export is still running' >&2
+    echo "$(i18n_message '[subscription] 已有订阅导出任务正在运行' '[subscription] another export is still running')" >&2
     exec {SUBSCRIPTION_LOCK_FD}>&-
     unset SUBSCRIPTION_LOCK_FD
     return 1
@@ -6272,12 +6272,12 @@ subscription_lock_release() {
 subscription_stage_valid() {
   local dir="$1" name
   for name in proxies clash clash2 sing-box v2rayn throne shadowrocket list; do
-    [ -s "$dir/$name" ] || { printf '[subscription] empty output: %s\n' "$name" >&2; return 1; }
+    [ -s "$dir/$name" ] || { printf "$(i18n_message '[subscription] 生成文件为空：%s\n' '[subscription] empty output: %s\n')" "$name" >&2; return 1; }
   done
   grep -q '^proxy-providers:' "$dir/clash" &&
     grep -q '^proxy-groups:' "$dir/clash2" || return 1
   "$WORK_DIR/jq" -e 'type == "object" and (.outbounds | type == "array")' "$dir/sing-box" >/dev/null 2>&1 || {
-    echo '[subscription] invalid sing-box output JSON' >&2
+    echo "$(i18n_message '[subscription] 生成的 Sing-box JSON 无效' '[subscription] invalid sing-box output JSON')" >&2
     return 1
   }
   [ ! -f "$dir/qr" ] || [ -s "$dir/qr" ]
@@ -6316,7 +6316,7 @@ subscription_publish() {
         [ -f "$backup/old/$name" ] || rm -f "$WORK_DIR/subscribe/$name"
       fi
     done
-    echo '[subscription] publish failed; previous files restored' >&2
+    echo "$(i18n_message '[subscription] 发布失败，已恢复之前的文件' '[subscription] publish failed; previous files restored')" >&2
     return 1
   fi
 }
@@ -6338,7 +6338,7 @@ export_list() {
   if [ "$result" = 0 ]; then subscription_publish "$stage/output" "$stage" || result=1; fi
   rm -rf "$stage"
   subscription_lock_release
-  if [ "$result" != 0 ]; then echo '[subscription] export aborted; existing files kept' >&2; return 1; fi
+  if [ "$result" != 0 ]; then echo "$(i18n_message '[subscription] 导出已终止，原有文件已保留' '[subscription] export aborted; existing files kept')" >&2; return 1; fi
 }
 
 export_list_impl() {
