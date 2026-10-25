@@ -138,7 +138,7 @@ for LOCALE_TEST in C C.UTF-8; do
   sing-box_json
   export_list install > "$ROOT/output"
   assert_files '🇩🇪 94vps'
-  assert_eq "$(wc -l < "$ROOT/lookups")" 2
+  assert_eq "$(wc -l < "$ROOT/lookups")" 4
   # Old configs may have missing/doubled/incorrect flags: all export formats must use VPS country.
   sed -i 's/🇩🇪 94vps/🇺🇸 94vps/g' "$WORK_DIR/conf/12_hysteria2_inbounds.json"
   sed -i 's/🇩🇪 94vps/94vps/g' "$WORK_DIR/conf/17_vmess-ws_inbounds.json"
