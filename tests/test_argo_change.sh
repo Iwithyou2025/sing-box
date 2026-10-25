@@ -81,4 +81,32 @@ SELECT=2 CREDS=bad
 if change_argo; then echo 'invalid token accepted' >&2; exit 1; fi
 grep -q '^ExecStart=.*--token old$' "$ARGO_DAEMON_FILE"
 [ ! -s "$EVENTS" ]
+# Valid Token is staged and applied without changing the daemon's enablement.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --token old\n' > "$ARGO_DAEMON_FILE"
+SELECT=2 CREDS=$(printf 'A%.0s' {1..130})
+change_argo
+grep -q -- "--token $CREDS" "$ARGO_DAEMON_FILE"
+! grep -q 'enable argo\|disable argo' "$EVENTS"
+# Failed Token restart restores the exact original service definition.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --token old\n' > "$ARGO_DAEMON_FILE"
+SELECT=2 CREDS=$(printf 'B%.0s' {1..130}) FAIL_RESTART=1
+if change_argo; then echo 'broken Token restart not reported' >&2; exit 1; fi
+grep -qx 'ExecStart=/etc/sing-box/cloudflared tunnel --token old' "$ARGO_DAEMON_FILE"
+# Valid JSON credentials are staged and restore old files after a failed restart.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --config %s/tunnel.yml run\n' "$WORK_DIR" > "$ARGO_DAEMON_FILE"
+printf '{"AccountTag":"old","TunnelSecret":"old","TunnelID":"old"}\n' > "$WORK_DIR/tunnel.json"
+printf 'tunnel: old\ningress:\n  - hostname: example.com\n' > "$WORK_DIR/tunnel.yml"
+SELECT=2 CREDS='{"AccountTag":"new","TunnelSecret":"new","TunnelID":"new"}' FAIL_RESTART=1
+if change_argo; then echo 'broken JSON restart not reported' >&2; exit 1; fi
+grep -q '"TunnelID":"old"' "$WORK_DIR/tunnel.json"
+grep -q '^tunnel: old' "$WORK_DIR/tunnel.yml"
+# JSON validation must occur before any service mutation.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --config %s/tunnel.yml run\n' "$WORK_DIR" > "$ARGO_DAEMON_FILE"
+SELECT=2 CREDS='{"TunnelID":null}'
+if change_argo; then echo 'malformed JSON accepted' >&2; exit 1; fi
+[ ! -s "$EVENTS" ]
 echo 'PASS: Argo type detection, Try rebuild, fixed reconnection, unknown mode, invalid credentials'
