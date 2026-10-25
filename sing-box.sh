@@ -1934,7 +1934,7 @@ custom_route_view() {
   fi
 
   hint "\n $(text 45) \n"
-  printf "  %-4s %-16s %s\n" "#" "Type" "Match"
+  printf "  %-4s %-16s %s\n" "#" "$(i18n_message "类型" "Type")" "$(i18n_message "匹配条件" "Match")"
   printf "  %-4s %-16s %s\n" "---" "---------------" "---------------------------------------"
 
   local IDX=0
@@ -4709,18 +4709,20 @@ iface_sync() {
   printf '%s\n' "$config" > "$state.tmp" && mv "$state.tmp" "$state"
 }
 iface_menu() {
-  local state installed ans n code value choice iface='' i idx=2 chosen='[]' f oldstate oldout oldroute
+  local state installed ans n code value value_label choice iface='' i idx=2 chosen='[]' f oldstate oldout oldroute
   iface_migrate || return 1
   state=$(iface_state)
   installed=$(iface_installed | jq_exec -R . | jq_exec -s '.') || return 1
-  hint " a. all"
+  hint " $(i18n_message " a. 全部" " a. all")"
   for n in "${!NODE_TAG[@]}"; do
     code=$(asc $((n+98)))
     echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || continue
     value=$(jq_exec -r --arg p "${NODE_TAG[n]}" '.[$p] // "default"' "$state")
-    hint " $code. ${PROTOCOL_LIST[n]} (current: $value)"
+    value_label="$value"
+    [ "$value" = default ] && value_label=$(i18n_message "默认（不指定）" "default")
+    hint " $code. ${PROTOCOL_LIST[n]} $(i18n_message "(当前出口：$value_label)" "(current: $value_label)")"
   done
-  reading " 多选需要修改默认出口的协议（如 hi，留空表示不修改）: " ans
+  reading " $(i18n_message "多选需修改默认出口的协议（如 hi，留空不修改）：" "Select protocols to change their default outbound (e.g. hi; blank to keep unchanged):") " ans
   ans="${ans,,}"
   [ -z "$ans" ] && return 0
   if [ "$ans" = a ]; then
@@ -4748,10 +4750,10 @@ iface_menu() {
       [ -e "$f" ] && [ "${f##*/}" != "lo" ] && ifaces+=("${f##*/}")
     done
   fi
-  hint " 1. 默认（不指定）"
+  hint " $(i18n_message "1. 默认（不指定）" "1. Default (no binding)")"
   for f in "${ifaces[@]}"; do hint " $idx. $f"; ((idx++)); done
-  hint " 0. cancel"
-  reading " 请选择网络出口: " choice
+  hint " $(i18n_message "0. 取消" "0. Cancel")"
+  reading " $(i18n_message "请选择网络出口：" "Select network outbound:") " choice
   case "$choice" in
     0|'') return 0 ;;
     1) iface='' ;;
@@ -6944,7 +6946,7 @@ $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto
 $(text 82) 2:
 $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2
 
-$(text 80) QRcode:
+$(text 80) $(i18n_message "二维码" "QR code"):
 $(text 82) 1:
 https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto
 
@@ -7013,10 +7015,10 @@ ${PROMPT}
 
 *******************************************
 
-$(hint "Index:
+$(hint "$(i18n_message "目录" "Index"):
 $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/
 
-QR code:
+$(i18n_message "二维码" "QR code"):
 $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/qr
 
 V2rayN $(text 80):
@@ -7044,7 +7046,7 @@ $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto
 $(text 82) 2:
 $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2
 
- $(text 80) QRcode:
+ $(text 80) $(i18n_message "二维码" "QR code"):
 $(text 82) 1:
 https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto
 
@@ -7070,13 +7072,13 @@ $(${WORK_DIR}/qrencode $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2)
 *******************************************
 ┌────────────────┐
 │                │
-│  $(warning "Traffic Stats") │
+│  $(warning "$(i18n_message "流量统计" "Traffic Stats")") │
 │                │
 └────────────────┘
 ---------------------------
 
-$(info "⬇ Inbound  (total):  $(format_traffic $IN_SUM)")
-$(hint "⬆ Outbound (total):  $(format_traffic $OUT_SUM)")
+$(info "⬇ $(i18n_message "入站（累计）" "Inbound (total)"):  $(format_traffic $IN_SUM)")
+$(hint "⬆ $(i18n_message "出站（累计）" "Outbound (total)"):  $(format_traffic $OUT_SUM)")
 "
   fi
   # === 结束 ===
@@ -7094,7 +7096,7 @@ $(hint "⬆ Outbound (total):  $(format_traffic $OUT_SUM)")
 create_shortcut() {
   # 测试分支可通过 SB_SCRIPT_REF 绑定独立的远程脚本入口；正式安装默认 main。
   local REF="${SB_SCRIPT_REF:-main}"
-  [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ && "$REF" != *..* ]] || { echo "Invalid SB_SCRIPT_REF" >&2; return 1; }
+  [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ && "$REF" != *..* ]] || { echo "$(i18n_message "SB_SCRIPT_REF 无效" "Invalid SB_SCRIPT_REF")" >&2; return 1; }
   cat > "${WORK_DIR}/sb.sh" << EOF
 #!/usr/bin/env bash
 # Project-owned launcher: download one complete script and pass its digest to the
@@ -7958,12 +7960,12 @@ select_language
 check_system_info
 if [ "$1" = '--setup-argo-monitor' ]; then
   if [ ! -s "$ARGO_DAEMON_FILE" ]; then
-    echo 'Argo service is not installed; nothing to monitor.' >&2
+    echo "$(i18n_message "未安装 Argo 服务，无需监控。" "Argo service is not installed; nothing to monitor.")" >&2
     exit 1
   fi
   create_shortcut || exit 1
   argo_monitor_sync
-  echo "Argo monitoring setup complete. Script ref: ${SB_SCRIPT_REF:-main}"
+  echo "$(i18n_message "Argo 监控配置完成。脚本分支：" "Argo monitoring setup complete. Script ref:") ${SB_SCRIPT_REF:-main}"
   exit 0
 fi
 if [ "$IS_ARGO_MONITOR" = '1' ]; then
