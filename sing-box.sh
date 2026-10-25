@@ -2345,9 +2345,9 @@ argo_manual_domain_healthy() {
     fi
     # Do not follow redirects: a 3xx response is a non-200 terminal result.
     # -s suppresses repeated transient DNS errors; final failure is reported below.
+    RC=0
     CODE=$(curl -s --connect-timeout "$LIMIT" --max-time "$LIMIT" \
-      -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
-    RC=$?
+      -o /dev/null -w '%{http_code}' "https://$DOMAIN/") || RC=$?
     LAST_RC=$RC
     if [ "$CODE" = 200 ]; then
       if [ "$RC" -eq 0 ]; then
