@@ -2355,7 +2355,17 @@ change_argo() {
       sed -i -E "s|^tunnel:.*|tunnel: $TUNNEL_ID|" "$STAGE/new.yml"
       if [ -n "$NEW_DOMAIN" ]; then
         grep -q 'hostname:' "$STAGE/new.yml" || { warning " No hostname to replace. "; rm -rf "$STAGE"; return 1; }
-        sed -i -E "0,/hostname:[[:space:]]*[^[:space:]]+/s|hostname:[[:space:]]*[^[:space:]]+|hostname: $NEW_DOMAIN|" "$STAGE/new.yml"
+        awk -v domain="$NEW_DOMAIN" '
+          !changed && /hostname:[[:space:]]*[^[:space:]]+/ {
+            sub(/hostname:[[:space:]]*[^[:space:]]+/, "hostname: " domain)
+            changed=1
+          }
+          { print }
+        ' "$STAGE/new.yml" > "$STAGE/new.yml.tmp" &&
+          mv -f "$STAGE/new.yml.tmp" "$STAGE/new.yml" || {
+            rm -rf "$STAGE"
+            return 1
+          }
       fi
       ARGO_NEW_ARGS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol http2 --config $WORK_DIR/tunnel.yml run"
     fi
