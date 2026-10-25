@@ -6,7 +6,7 @@ python3 - <<'PY' > "$ROOT/func.sh"
 import re
 from pathlib import Path
 s=Path("sing-box.sh").read_text()
-for name in ["argo_change_type","argo_change_lock","argo_change_valid_domain","argo_change_healthy","argo_change_rollback","argo_change_run","change_argo","export_argo_json_file","argo_manual_clock_us","argo_manual_wait_domain"]:
+for name in ["argo_change_type","argo_change_lock","argo_change_valid_domain","argo_change_healthy","argo_change_rollback","argo_change_run","change_argo","export_argo_json_file","argo_manual_wait_domain"]:
  m=re.search(r'^'+name+r'\(\) [\{\(]',s,re.M);assert m,name
  n=re.search(r'^[A-Za-z_][\w-]*\(\) \{',s[m.end():],re.M)
  print(s[m.start():m.end()+n.start()] if n else s[m.start():])
@@ -22,15 +22,14 @@ curl() { if [ "$HTTPS" = 1 ]; then echo 200; else echo 503; fi; }
 argo_manual_live_domain() {
   case "${MOCK_LIVE_MODE:-stable}" in
     stable) echo new.trycloudflare.com ;;
-    changed)
+    old_then_new)
       local COUNT
       COUNT=$(cat "$WORK_DIR/live-reads" 2>/dev/null || echo 0)
       echo "$((COUNT+1))" > "$WORK_DIR/live-reads"
-      if [ "$COUNT" -eq 0 ]; then echo new.trycloudflare.com; else echo rotated.trycloudflare.com; fi ;;
+      if [ "$COUNT" -eq 0 ]; then echo old.trycloudflare.com; else echo new.trycloudflare.com; fi ;;
     *) return 1 ;;
   esac
 }
-argo_manual_domain_healthy() { [ "$HTTPS" = 1 ]; }
 argo_manual_publish_domain() { [ "$EXPORT" = 1 ] && echo "$1" > "$WORK_DIR/argo-domain"; }
 create_argo_tunnel() { echo API >> "$EVENTS"; ARGO_TOKEN=$TOKEN_NEW; ARGO_JSON=$JSON_NEW; }
 export_list() { [ "$EXPORT" = 1 ] || return 1; echo updated > "$WORK_DIR/subscribe/output"; }
@@ -81,19 +80,26 @@ setup Token; [ "$(argo_change_type)" = Token ]
 setup Json; [ "$(argo_change_type)" = Json ]
 setup Try; INPUTS=(n); change_argo; ! grep -q restart "$EVENTS"; clean
 setup Try; INPUTS=(y); change_argo; grep -qx 'restart argo' "$EVENTS"; grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"; clean
-# If Argo unexpectedly restarts after the HTTP 200 check, never publish the stale host.
-setup Try; INPUTS=(y); MOCK_LIVE_MODE=changed
+# A stale pre-restart hostname is not accepted; keep reading until NEW appears.
+setup Try; INPUTS=(y); MOCK_LIVE_MODE=old_then_new
 echo old.trycloudflare.com > "$WORK_DIR/argo-domain"
-if change_argo; then echo 'stale tunnel domain was published' >&2; exit 1; fi
-grep -qx old.trycloudflare.com "$WORK_DIR/argo-domain"
-grep -qx original "$WORK_DIR/subscribe/output"
+change_argo
+grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"
+grep -qx 'restart argo' "$EVENTS"
 [ "$(cat "$WORK_DIR/live-reads")" -eq 2 ]; clean
-# An HTTP rejection (such as Cloudflare 530) cancels manual publication.
-# The tunnel was restarted once, but current domain and subscription remain unchanged.
+
+# HTTPS is deliberately not checked by manual Try switching.
+# Simulated HTTP 530 must not block obtaining the new local hostname.
 setup Try; INPUTS=(y); HTTPS=0
 echo old.trycloudflare.com > "$WORK_DIR/argo-domain"
-if change_argo; then echo 'HTTP failure did not abort manual switch' >&2; exit 1; fi
+change_argo
 grep -qx 'restart argo' "$EVENTS"
+grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"; clean
+
+# Subscription generation failure remains fatal and must not publish a new domain.
+setup Try; INPUTS=(y); EXPORT=0
+echo old.trycloudflare.com > "$WORK_DIR/argo-domain"
+if change_argo; then echo 'Failed subscription export accepted' >&2; exit 1; fi
 grep -qx old.trycloudflare.com "$WORK_DIR/argo-domain"
 grep -qx original "$WORK_DIR/subscribe/output"; clean
 setup Token; INPUTS=(1); change_argo; grep -Fq "$TOKEN_OLD" "$ARGO_DAEMON_FILE"; grep -qx 'restart argo' "$EVENTS"; clean
