@@ -14,6 +14,7 @@ on:
       - 'tests/test_argo_change_mode.sh'
       - 'tests/test_argo_manual_fast.sh'
       - 'tests/test_subscription_safety.sh'
+      - 'tests/test_language_output.sh'
       - 'tests/test_argo_monitor_code_refresh.sh'
   workflow_dispatch:
 
@@ -51,6 +52,10 @@ jobs:
       - name: Argo update and rollback regression
         shell: bash
         run: bash tests/test_argo_update.sh
+
+      - name: Chinese and English language selection regression
+        shell: bash
+        run: bash tests/test_language_output.sh
 
       - name: Argo tunnel type and transaction regression
         shell: bash
