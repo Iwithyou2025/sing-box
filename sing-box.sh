@@ -6173,6 +6173,126 @@ install_sing-box() {
   fi
 }
 
+subscription_template_valid() {
+  local kind="$1" file="$2"
+  [ -s "$file" ] || return 1
+  case "$kind" in
+    clash) grep -q '^proxy-providers:' "$file" && grep -q 'PROXY_PROVIDERS_URL' "$file" ;;
+    clash2) grep -q '^proxies:' "$file" && grep -q '^proxy-groups:' "$file" && grep -q '^rules:' "$file" ;;
+    sing-box-template) grep -Fq '"<OUTBOUND_REPLACE>"' "$file" && grep -Fq '"<NODE_REPLACE>"' "$file" ;;
+    *) return 1 ;;
+  esac
+}
+
+subscription_prepare_templates() {
+  local stage="$1" name dest url cache="$WORK_DIR/.subscription-templates"
+  mkdir -p "$stage/templates" "$cache" || return 1
+  for name in clash clash2 sing-box-template; do
+    dest="$stage/templates/$name"
+    if subscription_template_valid "$name" "$cache/$name"; then
+      cp "$cache/$name" "$dest" || return 1
+    elif subscription_template_valid "$name" "$TEMP_DIR/$name"; then
+      cp "$TEMP_DIR/$name" "$dest" || return 1
+    else
+      [ "$name" = sing-box-template ] && url=sing-box || url=$name
+      wget --no-check-certificate --tries=1 --timeout=6 -qO "$dest" "${GH_PROXY}${SUBSCRIBE_TEMPLATE}/$url" 2>/dev/null || {
+        printf '[subscription] download failed: %s\n' "$name" >&2; return 1;
+      }
+    fi
+    subscription_template_valid "$name" "$dest" || { printf '[subscription] invalid template: %s\n' "$name" >&2; return 1; }
+    if ! subscription_template_valid "$name" "$cache/$name"; then cp "$dest" "$cache/$name" || return 1; fi
+  done
+}
+
+subscription_lock_acquire() {
+  exec {SUBSCRIPTION_LOCK_FD}>"$WORK_DIR/.subscription-export.lock" || return 1
+  if ! flock -w 15 "$SUBSCRIPTION_LOCK_FD"; then
+    echo '[subscription] another export is still running' >&2
+    exec {SUBSCRIPTION_LOCK_FD}>&-
+    unset SUBSCRIPTION_LOCK_FD
+    return 1
+  fi
+}
+subscription_lock_release() {
+  if [ -n "${SUBSCRIPTION_LOCK_FD:-}" ]; then
+    flock -u "$SUBSCRIPTION_LOCK_FD" || true
+    exec {SUBSCRIPTION_LOCK_FD}>&-
+    unset SUBSCRIPTION_LOCK_FD
+  fi
+}
+
+subscription_stage_valid() {
+  local dir="$1" name
+  for name in proxies clash clash2 sing-box v2rayn throne shadowrocket list; do
+    [ -s "$dir/$name" ] || { printf '[subscription] empty output: %s\n' "$name" >&2; return 1; }
+  done
+  grep -q '^proxy-providers:' "$dir/clash" &&
+    grep -q '^proxy-groups:' "$dir/clash2" || return 1
+  "$WORK_DIR/jq" -e 'type == "object" and (.outbounds | type == "array")' "$dir/sing-box" >/dev/null 2>&1 || {
+    echo '[subscription] invalid sing-box output JSON' >&2
+    return 1
+  }
+  [ ! -f "$dir/qr" ] || [ -s "$dir/qr" ]
+}
+
+subscription_publish() {
+  local dir="$1" backup="$2" name tmp count=0
+  local -a files=(proxies clash clash2 sing-box v2rayn throne shadowrocket list)
+  [ -s "$dir/qr" ] && files+=(qr)
+  mkdir -p "$WORK_DIR/subscribe" "$backup/old" || return 1
+  for name in "${files[@]}"; do
+    if [ "$name" = list ]; then
+      [ ! -f "$WORK_DIR/list" ] || cp -p "$WORK_DIR/list" "$backup/old/list" || return 1
+    else
+      [ ! -f "$WORK_DIR/subscribe/$name" ] || cp -p "$WORK_DIR/subscribe/$name" "$backup/old/$name" || return 1
+    fi
+  done
+  for name in "${files[@]}"; do
+    if [ "$name" = list ]; then
+      tmp="$WORK_DIR/.list.next.$BASHPID"
+      cp "$dir/list" "$tmp" && mv -f "$tmp" "$WORK_DIR/list" || break
+    else
+      tmp="$WORK_DIR/subscribe/.$name.next.$BASHPID"
+      cp "$dir/$name" "$tmp" && mv -f "$tmp" "$WORK_DIR/subscribe/$name" || break
+    fi
+    ((count+=1))
+  done
+  if [ "$count" -ne "${#files[@]}" ]; then
+    rm -f "$tmp"
+    for name in "${files[@]:0:count}"; do
+      if [ "$name" = list ]; then
+        [ ! -f "$backup/old/list" ] || cp -p "$backup/old/list" "$WORK_DIR/list"
+        [ -f "$backup/old/list" ] || rm -f "$WORK_DIR/list"
+      else
+        [ ! -f "$backup/old/$name" ] || cp -p "$backup/old/$name" "$WORK_DIR/subscribe/$name"
+        [ -f "$backup/old/$name" ] || rm -f "$WORK_DIR/subscribe/$name"
+      fi
+    done
+    echo '[subscription] publish failed; previous files restored' >&2
+    return 1
+  fi
+}
+
+# sb -n, manual switching, auto monitoring, and initial install share one safe export.
+export_list() {
+  local stage result=0
+  subscription_lock_acquire || return 1
+  stage=$(mktemp -d "$WORK_DIR/.subscription-export.XXXXXXXX") || { subscription_lock_release; return 1; }
+  mkdir -p "$stage/output" || result=1
+  if [ "$result" = 0 ]; then
+    check_install
+    subscription_prepare_templates "$stage" || result=1
+  fi
+  if [ "$result" = 0 ]; then
+    SUBSCRIBE_OUTPUT_DIR="$stage/output" SUBSCRIBE_TEMPLATE_WORK_DIR="$stage/templates" export_list_impl "$@" || result=1
+  fi
+  if [ "$result" = 0 ]; then subscription_stage_valid "$stage/output" || result=1; fi
+  if [ "$result" = 0 ]; then subscription_publish "$stage/output" "$stage" || result=1; fi
+  rm -rf "$stage"
+  subscription_lock_release
+  if [ "$result" != 0 ]; then echo '[subscription] export aborted; existing files kept' >&2; return 1; fi
+}
+
 export_list_impl() {
   IS_INSTALL=$1
 
