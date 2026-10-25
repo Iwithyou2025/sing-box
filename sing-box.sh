@@ -2258,70 +2258,190 @@ input_argo_auth() {
 }
 
 # 更换 Argo 隧道类型
+# 只从现有守护服务参数识别类型，禁止未知配置被误当成临时隧道。
+argo_current_type() {
+  local ARG
+  ARG=$(grep -E '^(ExecStart=|command_args=)' "$ARGO_DAEMON_FILE" | head -n 1) || return 1
+  case "$ARG" in
+    *'--url '*) printf '%s\n' Try ;;
+    *'--token '*) printf '%s\n' Token ;;
+    *'--config '*) printf '%s\n' Json ;;
+    *) return 1 ;;
+  esac
+}
+
+# 临时隧道操作和核心更新共用一次重启/回退控制，避免更改开机自启状态。
+# 固定隧道的认证数据先写临时目录，确认服务能启动再发布订阅。
 change_argo() {
   check_install
-  if [ "${STATUS[0]}" =  "$(text 26)" ]; then
-    error "\n $(text 39) "
-  elif [ "${STATUS[1]}" = "$(text 26)" ]; then
-    error "\n $(text 61) "
+  [ "${STATUS[0]}" != "$(text 26)" ] && [ "${STATUS[1]}" != "$(text 26)" ] || {
+    warning " Argo is not installed. "
+    return 1
+  }
+  [ -s "$ARGO_DAEMON_FILE" ] || return 1
+  local TYPE CURRENT OLD_DOMAIN OPTION NEW_AUTH='' NEW_DOMAIN='' STAGE='' MONITOR_RUNNING=0
+  local WAS_RUNNING=0 ARGO_NEW_ARGS='' JSON_FILE='' YAML_FILE=''
+  TYPE=$(argo_current_type) || { warning " Unknown Argo configuration; no changes made. "; return 1; }
+  CURRENT=$(grep -E '^(ExecStart=|command_args=)' "$ARGO_DAEMON_FILE" | head -n 1)
+  OLD_DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR/argo-domain" 2>/dev/null | head -n 1)
+  if [ "$TYPE" = Try ]; then
+    hint " Current Argo: Try  ${OLD_DOMAIN:+($OLD_DOMAIN)} "
+    reading " Rebuild the current temporary tunnel? [y/N]: " OPTION
+    [[ "${OPTION,,}" == y ]] || return 0
+  else
+    hint " Current Argo type: $TYPE "
+    hint " 1. Reconnect existing tunnel (keep credentials and domain) "
+    hint " 2. Replace $TYPE credentials (and optionally domain) "
+    reading " Choose [1]: " OPTION
+    OPTION=${OPTION:-1}
+    case "$OPTION" in
+      1) ;;
+      2)
+        reading " New $TYPE credential (Token or JSON file path / one-line JSON): " NEW_AUTH
+        [ -n "$NEW_AUTH" ] || { warning " Empty credentials; unchanged. "; return 1; }
+        reading " New domain (blank keeps current domain): " NEW_DOMAIN
+        if [ -n "$NEW_DOMAIN" ] &&
+           [[ ! "$NEW_DOMAIN" =~ ^[a-zA-Z0-9.-]+$ || "$NEW_DOMAIN" != *.* ]]; then
+          warning " Invalid domain; unchanged. "
+          return 1
+        fi
+        ;;
+      *) return 0 ;;
+    esac
   fi
 
-  # 根据系统类型检查 Argo 服务配置
-  local ARGO_CONFIG=$(grep -E '^(command_args=|ExecStart=)' ${ARGO_DAEMON_FILE})
-
-  case "$ARGO_CONFIG" in
-    *--config* )
-      ARGO_TYPE='Json'
-      ;;
-    *--token* )
-      ARGO_TYPE='Token'
-      ;;
-    * )
-      ARGO_TYPE='Try'
-      cmd_systemctl enable argo && sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain
-  esac
-
-  fetch_nodes_value
-  hint "\n $(text 90) \n"
-  unset ARGO_DOMAIN
-  hint " $(text 91) \n" && reading " $(text 24) " CHANGE_TO
-
-  case "$CHANGE_TO" in
-    1 )
-      cmd_systemctl disable argo
-      [ -s ${WORK_DIR}/tunnel.json ] && rm -f ${WORK_DIR}/tunnel.{json,yml}
-
-      # 根据系统类型修改配置文件
-      [ "$SYSTEM" = 'Alpine' ] && sed -i "s@^command_args=.*@command_args=\"--edge-ip-version auto --protocol http2 --no-autoupdate --url http://localhost:$PORT_NGINX\"@g" ${ARGO_DAEMON_FILE} || sed -i "s@ExecStart=.*@ExecStart=${WORK_DIR}/cloudflared tunnel --edge-ip-version auto --protocol http2 --no-autoupdate --url http://localhost:$PORT_NGINX@g" ${ARGO_DAEMON_FILE}
-      ;;
-    2 )
-      [ -s ${WORK_DIR}/tunnel.json ] && rm -f ${WORK_DIR}/tunnel.{json,yml}
-      input_argo_auth is_change_argo
-      cmd_systemctl disable argo
-
-      if [ -n "$ARGO_TOKEN" ]; then
-        [ "$SYSTEM" = 'Alpine' ] && sed -i "s@^command_args=.*@command_args=\"--edge-ip-version auto --protocol http2 run --token ${ARGO_TOKEN}\"@g" ${ARGO_DAEMON_FILE} || sed -i "s@ExecStart=.*@ExecStart=${WORK_DIR}/cloudflared tunnel --edge-ip-version auto --protocol http2 run --token ${ARGO_TOKEN}@g" ${ARGO_DAEMON_FILE}
-      elif [ -n "$ARGO_JSON" ]; then
-        [ "$SYSTEM" = 'Alpine' ] && sed -i "s@^command_args=.*@command_args=\"--edge-ip-version auto --protocol http2 --config ${WORK_DIR}/tunnel.yml run\"@g" ${ARGO_DAEMON_FILE} || sed -i "s@ExecStart=.*@ExecStart=${WORK_DIR}/cloudflared tunnel --edge-ip-version auto --protocol http2 --config ${WORK_DIR}/tunnel.yml run@g" ${ARGO_DAEMON_FILE}
+  # 检查输入前不得停用服务或删除旧的认证文件。
+  STAGE=$(mktemp -d "$WORK_DIR/.argo-change.XXXXXXXX") || return 1
+  chmod 700 "$STAGE"
+  cp -p "$ARGO_DAEMON_FILE" "$STAGE/service" || { rm -rf "$STAGE"; return 1; }
+  for JSON_FILE in tunnel.json tunnel.yml; do
+    [ -f "$WORK_DIR/$JSON_FILE" ] && cp -p "$WORK_DIR/$JSON_FILE" "$STAGE/$JSON_FILE"
+  done
+  if [ "$OPTION" = 2 ]; then
+    if [ "$TYPE" = Token ]; then
+      [[ "$NEW_AUTH" =~ ^[A-Za-z0-9_=-]{120,250}$ ]] || {
+        warning " Invalid Token. " ; rm -rf "$STAGE"; return 1;
+      }
+      ARGO_NEW_ARGS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol http2 run --token $NEW_AUTH"
+    else
+      if [ -f "$NEW_AUTH" ]; then
+        cp "$NEW_AUTH" "$STAGE/new.json"
+      else
+        printf '%s\n' "$NEW_AUTH" > "$STAGE/new.json"
       fi
+      if ! "$WORK_DIR/jq" -e '
+        (.TunnelID | type == "string" and length > 0) and
+        (.TunnelSecret | type == "string" and length > 0) and
+        (.AccountTag | type == "string" and length > 0)
+      ' "$STAGE/new.json" >/dev/null 2>&1; then
+        warning " Invalid JSON credentials; unchanged. "
+        rm -rf "$STAGE"; return 1
+      fi
+      # 先生成候选 YAML，避免新旧认证文件交叉使用。
+      local TUNNEL_ID DOMAIN
+      TUNNEL_ID=$("$WORK_DIR/jq" -r '.TunnelID' "$STAGE/new.json")
+      DOMAIN=$NEW_DOMAIN
+      [ -n "$DOMAIN" ] || DOMAIN=$(sed -n 's/^[[:space:]]*-[[:space:]]*hostname:[[:space:]]*//p' "$WORK_DIR/tunnel.yml" | head -n 1)
+      [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ && "$DOMAIN" == *.* ]] || {
+        warning " Missing valid fixed domain; unchanged. "; rm -rf "$STAGE"; return 1;
+      }
+      cat > "$STAGE/new.yml" <<EOF
+tunnel: $TUNNEL_ID
+credentials-file: $WORK_DIR/tunnel.json
+ingress:
+  - hostname: $DOMAIN
+    service: http://localhost:$PORT_NGINX
+  - service: http_status:404
+EOF
+      ARGO_NEW_ARGS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol http2 --config $WORK_DIR/tunnel.yml run"
+    fi
+  fi
 
-      # 更新相关配置文件中的域名
-      [ -s ${WORK_DIR}/conf/17_${NODE_TAG[6]}_inbounds.json ] && sed -i "s/VMESS_HOST_DOMAIN.*/VMESS_HOST_DOMAIN\": \"$ARGO_DOMAIN\"/" ${WORK_DIR}/conf/17_${NODE_TAG[6]}_inbounds.json
-      [ -s ${WORK_DIR}/conf/18_${NODE_TAG[7]}_inbounds.json ] && sed -i "s/\"server_name\":.*/\"server_name\": \"$ARGO_DOMAIN\",/" ${WORK_DIR}/conf/18_${NODE_TAG[7]}_inbounds.json
-      ;;
-    * )
-      exit 0
-  esac
+  cmd_systemctl status argo >/dev/null 2>&1 && WAS_RUNNING=1
+  if [ "$SYSTEM" = Alpine ]; then
+    rc-service argo-monitor status >/dev/null 2>&1 && MONITOR_RUNNING=1
+  else
+    systemctl is-active --quiet argo-monitor.service && MONITOR_RUNNING=1
+  fi
+  [ "$MONITOR_RUNNING" = 1 ] && {
+    if [ "$SYSTEM" = Alpine ]; then rc-service argo-monitor stop; else systemctl stop argo-monitor.service; fi
+  }
+  # 若服务原本被用户关闭，不擅自启用它。
+  if [ "$OPTION" = 2 ]; then
+    if [ "$TYPE" = Json ]; then
+      cp "$STAGE/new.json" "$WORK_DIR/tunnel.json" &&
+        cp "$STAGE/new.yml" "$WORK_DIR/tunnel.yml" || {
+          warning " Failed to write JSON credentials. "
+          cp -p "$STAGE/service" "$ARGO_DAEMON_FILE"
+          rm -rf "$STAGE"
+          return 1
+        }
+      chmod 600 "$WORK_DIR/tunnel.json"
+    fi
+    if [ "$SYSTEM" = Alpine ]; then
+      local ARGO_FLAGS="${ARGO_NEW_ARGS#"$WORK_DIR/cloudflared tunnel "}"
+      sed -i "s|^command_args=.*|command_args=\"$ARGO_FLAGS\"|" "$ARGO_DAEMON_FILE"
+    else
+      sed -i "s|^ExecStart=.*|ExecStart=$ARGO_NEW_ARGS|" "$ARGO_DAEMON_FILE"
+      systemctl daemon-reload
+    fi
+  fi
 
-  # 启用 Argo 服务
-  cmd_systemctl enable argo
-  argo_monitor_sync
-
-  # 更新节点信息和配置
-  fetch_nodes_value
-  export_nginx_conf_file
-  nginx_sync
-  export_list
+  if [ "$WAS_RUNNING" = 1 ] && ! cmd_systemctl restart argo; then
+    warning " Argo restart failed; rolling back. "
+    cp -p "$STAGE/service" "$ARGO_DAEMON_FILE"
+    if [ "$TYPE" = Json ] && [ "$OPTION" = 2 ]; then
+      for JSON_FILE in tunnel.json tunnel.yml; do
+        [ -f "$STAGE/$JSON_FILE" ] && cp -p "$STAGE/$JSON_FILE" "$WORK_DIR/$JSON_FILE"
+      done
+    fi
+    [ "$SYSTEM" != Alpine ] && systemctl daemon-reload
+    cmd_systemctl restart argo || warning " Argo rollback restart failed. "
+    [ "$MONITOR_RUNNING" = 1 ] && {
+      if [ "$SYSTEM" = Alpine ]; then rc-service argo-monitor start; else systemctl start argo-monitor.service; fi
+    }
+    rm -rf "$STAGE"
+    return 1
+  fi
+  if [ "$WAS_RUNNING" = 1 ] && ! cmd_systemctl status argo >/dev/null 2>&1; then
+    warning " Argo failed health check; restoring previous configuration. "
+    cp -p "$STAGE/service" "$ARGO_DAEMON_FILE"
+    [ "$TYPE" = Json ] && [ "$OPTION" = 2 ] && {
+      for JSON_FILE in tunnel.json tunnel.yml; do
+        [ -f "$STAGE/$JSON_FILE" ] && cp -p "$STAGE/$JSON_FILE" "$WORK_DIR/$JSON_FILE"
+      done
+    }
+    [ "$SYSTEM" != Alpine ] && systemctl daemon-reload
+    cmd_systemctl restart argo || warning " Argo rollback restart failed. "
+    [ "$MONITOR_RUNNING" = 1 ] && {
+      if [ "$SYSTEM" = Alpine ]; then rc-service argo-monitor start; else systemctl start argo-monitor.service; fi
+    }
+    rm -rf "$STAGE"
+    return 1
+  fi
+  if [ "$TYPE" = Try ] && [ "$WAS_RUNNING" = 1 ]; then
+    local NEW_QUICK_DOMAIN
+    NEW_QUICK_DOMAIN=$(argo_monitor_wait_domain) || {
+      warning " Tunnel restarted but no valid temporary domain yet; monitor will retry. "
+      NEW_QUICK_DOMAIN=''
+    }
+    [ -n "$NEW_QUICK_DOMAIN" ] && argo_monitor_publish_domain "$NEW_QUICK_DOMAIN" "$OLD_DOMAIN"
+  elif [ "$OPTION" = 2 ]; then
+    # 固定隧道更换认证后，仅在用户填写新域名时更新订阅。
+    if [ -n "$NEW_DOMAIN" ]; then
+      ARGO_DOMAIN=$NEW_DOMAIN
+      for JSON_FILE in "$WORK_DIR"/conf/17_*_inbounds.json "$WORK_DIR"/conf/18_*_inbounds.json; do
+        [ -f "$JSON_FILE" ] || continue
+        sed -i -E "s|(\\\"VMESS_HOST_DOMAIN\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|;s|(\\\"server_name\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|" "$JSON_FILE"
+      done
+      export_list || warning " Tunnel changed, but subscription refresh failed. "
+    fi
+  fi
+  [ "$MONITOR_RUNNING" = 1 ] && {
+    if [ "$SYSTEM" = Alpine ]; then rc-service argo-monitor start; else systemctl start argo-monitor.service; fi
+  }
+  rm -rf "$STAGE"
+  info " Argo: $TYPE operation completed. "
 }
 
 check_root() {
