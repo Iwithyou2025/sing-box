@@ -2270,16 +2270,59 @@ argo_change_type() {
   esac
 }
 
-# One-shot Quick Tunnel hostname retrieval for MANUAL switching only.
+# Each manual Quick Tunnel metrics request is capped by its remaining time budget.
 argo_manual_live_domain() {
-  local PID ADDR HOST
+  local LIMIT="${1:-1}" PID ADDR HOST
   PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
   [[ "$PID" =~ ^[0-9]+$ ]] || return 1
   ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
   [ -n "$ADDR" ] || return 1
-  HOST=$(wget -qO- --timeout=1 --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}') || return 1
+  # curl supports fractional timeouts, so even the last attempt stays within the 5s budget.
+  HOST=$(curl --noproxy '*' -fsS --connect-timeout "$LIMIT" --max-time "$LIMIT" "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
   [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   printf '%s\n' "$HOST"
+}
+
+# Monotonic-enough wall-clock microseconds for an overall manual readiness deadline.
+# Bash 5 provides EPOCHREALTIME; earlier Bash versions fall back to SECONDS.
+argo_manual_clock_us() {
+  local CURRENT="${EPOCHREALTIME:-}"
+  if [[ "$CURRENT" =~ ^[0-9]+[.][0-9]{6}$ ]]; then
+    printf '%s\n' "${CURRENT/./}"
+  else
+    printf '%s\n' "$(( SECONDS * 1000000 ))"
+  fi
+}
+
+# Poll for at most 5s, with no initial sleep; return immediately once the hostname is valid.
+# This is independent of argo_monitor_wait_domain and never restarts the tunnel.
+argo_manual_wait_domain() {
+  local START DEADLINE NOW REMAIN LIMIT PAUSE HOST
+  START=$(argo_manual_clock_us)
+  DEADLINE=$((START + 5000000))
+  while :; do
+    NOW=$(argo_manual_clock_us)
+    REMAIN=$((DEADLINE - NOW))
+    [ "$REMAIN" -gt 0 ] || return 1
+    if [ "$REMAIN" -ge 1000000 ]; then
+      LIMIT=1
+    else
+      printf -v LIMIT '0.%06d' "$REMAIN"
+    fi
+    HOST=$(argo_manual_live_domain "$LIMIT") && {
+      printf '%s\n' "$HOST"
+      return 0
+    }
+    NOW=$(argo_manual_clock_us)
+    REMAIN=$((DEADLINE - NOW))
+    [ "$REMAIN" -gt 0 ] || return 1
+    if [ "$REMAIN" -gt 200000 ]; then
+      sleep 0.2
+    else
+      printf -v PAUSE '0.%06d' "$REMAIN"
+      sleep "$PAUSE"
+    fi
+  done
 }
 
 # One HTTPS GET, single attempt, 1s total timeout; retain original curl diagnostics.
@@ -2389,8 +2432,8 @@ argo_change_run() (
   if [ "$TYPE" = Try ]; then
     info " Restarting Argo... "
     cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1 || return 1
-    LIVE=$(argo_manual_live_domain) || {
-      warning " Quick Tunnel hostname not ready (single 1-second request); subscriptions unchanged. "
+    LIVE=$(argo_manual_wait_domain) || {
+      warning " Quick Tunnel hostname not ready within 5 seconds; subscriptions unchanged. "
       return 1
     }
     info " New Argo domain: $LIVE "
