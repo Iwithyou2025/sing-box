@@ -12,6 +12,8 @@ on:
       - 'tests/test_nginx_ws_read_timeout.sh'
       - 'tests/test_argo_update.sh'
       - 'tests/test_argo_change_mode.sh'
+      - 'tests/test_argo_manual_fast.sh'
+      - 'tests/test_subscription_safety.sh'
   workflow_dispatch:
 
 jobs:
@@ -52,3 +54,11 @@ jobs:
       - name: Argo tunnel type and transaction regression
         shell: bash
         run: bash tests/test_argo_change_mode.sh
+
+      - name: One-second manual Argo path regression
+        shell: bash
+        run: bash tests/test_argo_manual_fast.sh
+
+      - name: Safe subscription transaction and empty-template regression
+        shell: bash
+        run: bash tests/test_subscription_safety.sh
