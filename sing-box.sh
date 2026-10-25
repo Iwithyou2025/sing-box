@@ -485,6 +485,17 @@ text() {
   fi
 }
 
+# Display-only localization. Never use localized strings as command arguments,
+# service state, subscription content, file names, or machine-readable markers.
+# L=C selects Chinese, L=E selects English; missing L defaults to English.
+i18n_message() {
+  if [ "${L:-E}" = C ]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 # 根据 INSTALL_PROTOCOLS 计算安装流程总步骤数
 # sing-box 协议分类：Reality 类 (b/j/k)、Hysteria2(c)、WS 类 (h/i)
 calc_install_steps() {
@@ -729,7 +740,7 @@ input_uuid() {
 
 input_node_name() {
   # 新装、非交互安装与重新添加协议，共用 VPS 国旗；输入只决定名称文字。
-  node_country_flag_load || error " Unable to determine VPS country; retry when IP lookup is available. "
+  node_country_flag_load || error " $(i18n_message "无法确定 VPS 所在国家或地区，请在 IP 查询恢复后重试。" "Unable to determine VPS country; retry when IP lookup is available.") "
   local NODE_NAME_INPUT='' NODE_NAME_DEFAULT
   if command -v hostname >/dev/null 2>&1; then
     NODE_NAME_DEFAULT=$(hostname)
@@ -746,7 +757,7 @@ input_node_name() {
     fi
     NODE_NAME_CONFIRM=${NODE_NAME_INPUT:-$NODE_NAME_DEFAULT}
   fi
-  NODE_NAME_CONFIRM=$(node_name_with_flag "$NODE_NAME_CONFIRM" "$NODE_COUNTRY_FLAG") || error " Invalid node name. "
+  NODE_NAME_CONFIRM=$(node_name_with_flag "$NODE_NAME_CONFIRM" "$NODE_COUNTRY_FLAG") || error " $(i18n_message "节点名称无效。" "Invalid node name.") "
 }
 
 # 判断完整的两个区域指示符（如 🇺🇸），按 UTF-8 字节判断，兼容 C / UTF-8 locale。
@@ -799,7 +810,7 @@ node_country_flag_load() {
   else
     # 查不到且无可信缓存时保持已有配置，不能从某个协议或用户输入猜国家。
     unset NODE_COUNTRY_FLAG
-    warning " Unable to determine VPS country; existing names were not changed. " >&2
+    warning " $(i18n_message "无法确定 VPS 所在国家或地区，现有节点名称未修改。" "Unable to determine VPS country; existing names were not changed.") " >&2
     return 1
   fi
   NODE_COUNTRY_FLAG=$FLAG
@@ -2314,7 +2325,7 @@ argo_manual_publish_domain() {
   [ -f "$SNAPSHOT/argo-domain" ] && cp -p "$SNAPSHOT/argo-domain" "$WORK_DIR/argo-domain" || rm -f "$WORK_DIR/argo-domain"
   cp -a "$SNAPSHOT/conf/." "$WORK_DIR/conf/"
   rm -rf "$SNAPSHOT"
-  warning " Subscription update failed; previous domain references restored. "
+  warning " $(i18n_message "订阅更新失败，已恢复原有域名引用。" "Subscription update failed; previous domain references restored.") "
   return 1
 }
 
@@ -2369,17 +2380,17 @@ argo_change_rollback() {
     fi
   done
   [ "$SYSTEM" = Alpine ] || systemctl daemon-reload
-  cmd_systemctl restart argo || warning " Argo rollback restart failed "
+  cmd_systemctl restart argo || warning " $(i18n_message "Argo 回退后重启失败" "Argo rollback restart failed") "
 }
 
 argo_change_run() (
   local TYPE="$1" ACTION="$2" OLD_DOMAIN="$3" NEW_DOMAIN="$4" AUTH="$5"
   local STAGE='' SNAPSHOT='' ROLLBACK=0 ITEM NEW_ARGS='' TOKEN='' JSON='' LINE
   local LOCK="$WORK_DIR/.argo-change.lock" LIVE=''
-  argo_change_lock || { warning " Argo operation in progress; no changes made. "; return 1; }
+  argo_change_lock || { warning " $(i18n_message "Argo 操作正在进行，本次未做更改。" "Argo operation in progress; no changes made.") "; return 1; }
   trap '
     if [ "$ROLLBACK" = 1 ]; then
-      warning " Argo change failed; restoring previous configuration. "
+      warning " $(i18n_message "Argo 更换失败，正在恢复之前的配置。" "Argo change failed; restoring previous configuration.") "
       argo_change_rollback
     fi
     [ -z "$STAGE" ] || rm -rf "$STAGE"
@@ -2387,23 +2398,23 @@ argo_change_run() (
     rmdir "$LOCK" 2>/dev/null || true
   ' EXIT
   cmd_systemctl status argo >/dev/null 2>&1 || {
-    warning " Argo is stopped; existing service state preserved. "
+    warning " $(i18n_message "Argo 已停止，保留现有服务状态。" "Argo is stopped; existing service state preserved.") "
     return 1
   }
 
   if [ "$TYPE" = Try ]; then
-    info " Restarting Argo... "
+    info " $(i18n_message "正在重启 Argo..." "Restarting Argo...") "
     cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1 || return 1
     LIVE=$(argo_manual_wait_domain "$OLD_DOMAIN") || {
-      warning " Argo stopped while waiting for a new Quick Tunnel hostname; subscriptions unchanged. "
+      warning " $(i18n_message "等待新的临时隧道域名时 Argo 已停止，订阅保持不变。" "Argo stopped while waiting for a new Quick Tunnel hostname; subscriptions unchanged.") "
       return 1
     }
-    info " New Argo domain: $LIVE "
+    info " $(i18n_message "新的 Argo 域名：$LIVE" "New Argo domain: $LIVE") "
     # Per manual Try policy: the new hostname itself confirms tunnel replacement.
     # No DNS lookup, HTTP status or fixed elapsed-time validation is performed.
-    info " Argo tunnel updated; syncing subscriptions (without DNS/HTTPS checks). "
+    info " $(i18n_message "Argo 隧道已更换，正在同步订阅（不执行 DNS/HTTPS 检查）。" "Argo tunnel updated; syncing subscriptions (without DNS/HTTPS checks).") "
     ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
-    info " Argo changed and subscriptions updated. "
+    info " $(i18n_message "Argo 已更换，订阅已同步。" "Argo changed and subscriptions updated.") "
     return 0
   fi
   if [ "$ACTION" = reconnect ]; then
@@ -2431,7 +2442,7 @@ argo_change_run() (
   if [ "$TYPE" = Token ]; then
     TOKEN=${AUTH##* }
     [[ "$TOKEN" =~ ^[A-Za-z0-9_./+=-]{120,4096}$ ]] || {
-      warning " Invalid Token; current tunnel retained. "
+      warning " $(i18n_message "Token 无效，已保留原有隧道。" "Invalid Token; current tunnel retained.") "
       return 1
     }
     NEW_ARGS="--edge-ip-version auto --protocol http2 run --token $TOKEN"
@@ -2439,7 +2450,7 @@ argo_change_run() (
     JSON=$AUTH
     [ -x "$WORK_DIR/jq" ] || return 1
     printf '%s' "$JSON" | "$WORK_DIR/jq" -e '.TunnelID and .TunnelSecret and .AccountTag' >/dev/null 2>&1 || {
-      warning " Invalid JSON; current tunnel retained. "
+      warning " $(i18n_message "JSON 无效，已保留原有隧道。" "Invalid JSON; current tunnel retained.") "
       return 1
     }
     ARGO_JSON="$JSON" ARGO_DOMAIN="$NEW_DOMAIN" export_argo_json_file "$STAGE"
@@ -2470,7 +2481,7 @@ argo_change_run() (
   [ "$SYSTEM" = Alpine ] || systemctl daemon-reload
   cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1 || return 1
   argo_change_healthy "$NEW_DOMAIN" || {
-    warning " Fixed tunnel HTTPS check failed; rolling back. "
+    warning " $(i18n_message "固定隧道的 HTTPS 检查失败，正在回退。" "Fixed tunnel HTTPS check failed; rolling back.") "
     return 1
   }
   if [ "$OLD_DOMAIN" != "$NEW_DOMAIN" ]; then
@@ -2481,7 +2492,7 @@ argo_change_run() (
   fi
   ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 export_list >/dev/null || return 1
   ROLLBACK=0
-  info " Argo fixed tunnel updated; subscriptions refreshed. "
+  info " $(i18n_message "Argo 固定隧道已更新，订阅已刷新。" "Argo fixed tunnel updated; subscriptions refreshed.") "
 )
 
 # 自动识别安装时留下的类型，只做同类型操作。
@@ -2490,7 +2501,7 @@ change_argo() {
   check_install
   if [ "${STATUS[0]}" = "$(text 26)" ]; then error "\n $(text 39) "; fi
   if [ "${STATUS[1]}" = "$(text 26)" ]; then error "\n $(text 61) "; fi
-  TYPE=$(argo_change_type) || { warning " Unknown Argo type; no changes made. "; return 1; }
+  TYPE=$(argo_change_type) || { warning " $(i18n_message "未知的 Argo 隧道类型，未做更改。" "Unknown Argo type; no changes made.") "; return 1; }
   ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 fetch_nodes_value
   OLD_DOMAIN=$ARGO_DOMAIN
   if [ "$TYPE" = Try ]; then
@@ -2528,7 +2539,7 @@ change_argo() {
   case "${CHOICE:-1}" in
     1) argo_change_run "$TYPE" reconnect "$OLD_DOMAIN" '' ''; return $? ;;
     2) ;;
-    *) warning " Invalid option; no changes made. "; return 1 ;;
+    *) warning " $(i18n_message "无效选项，未做更改。" "Invalid option; no changes made.") "; return 1 ;;
   esac
   if [ "${L:-E}" = C ]; then
     reading " 新域名（留空保持 ${OLD_DOMAIN:-原有域名}）: " NEW_DOMAIN
@@ -2536,13 +2547,13 @@ change_argo() {
     reading " New domain (leave blank to keep ${OLD_DOMAIN:-unset}): " NEW_DOMAIN
   fi
   NEW_DOMAIN=${NEW_DOMAIN:-$OLD_DOMAIN}
-  argo_change_valid_domain "$NEW_DOMAIN" || { warning " Invalid fixed domain. "; return 1; }
+  argo_change_valid_domain "$NEW_DOMAIN" || { warning " $(i18n_message "固定隧道域名无效。" "Invalid fixed domain.") "; return 1; }
   if [ "${L:-E}" = C ]; then
     reading " 输入新的 $TYPE 认证信息（或 Cloudflare API Token）: " AUTH
   else
     reading " New $TYPE credential (Token, JSON or Cloudflare API token): " AUTH
   fi
-  [ -n "$AUTH" ] || { warning " Empty credentials; no changes made. "; return 1; }
+  [ -n "$AUTH" ] || { warning " $(i18n_message "认证信息为空，未做更改。" "Empty credentials; no changes made.") "; return 1; }
   argo_change_run "$TYPE" replace "$OLD_DOMAIN" "$NEW_DOMAIN" "$AUTH"
 }
 
@@ -4667,7 +4678,7 @@ iface_sync() {
       # JSON; sing-box accepts them, but jq rejects the entire file. Read only
       # the inbound tag field without parsing unrelated metadata.
       t=$(awk -F '"' '/"tag"[[:space:]]*:[[:space:]]*"/{print $4; exit}' "$f") || return 1
-      [ -n "$t" ] || { warning " Missing inbound tag in $f "; return 1; }
+      [ -n "$t" ] || { warning " $(i18n_message "配置文件 $f 缺少入站标签。" "Missing inbound tag in $f") "; return 1; }
       tags=$(echo "$tags" | jq_exec -c --arg key "$suffix" --arg tag "$t" '.[$key]=$tag') || return 1
       break
     done
@@ -4715,7 +4726,7 @@ iface_menu() {
   if [ "$ans" = a ]; then
     chosen="$installed"
   else
-    [[ "$ans" =~ ^[b-m]+$ ]] || { warning " Invalid selection "; return 1; }
+    [[ "$ans" =~ ^[b-m]+$ ]] || { warning " $(i18n_message "选择无效" "Invalid selection") "; return 1; }
     for ((i=0;i<${#ans};i++)); do
       code="${ans:i:1}"
       local found=''
@@ -4723,7 +4734,7 @@ iface_menu() {
         if [ "$code" = "$(asc $((n+98)))" ]; then found="$n"; break; fi
       done
       [ -n "$found" ] || return 1
-      echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || { warning " Protocol not installed "; return 1; }
+      echo "$installed" | jq_exec -e --arg p "${NODE_TAG[n]}" 'index($p)!=null' >/dev/null 2>&1 || { warning " $(i18n_message "协议尚未安装" "Protocol not installed") "; return 1; }
       chosen=$(echo "$chosen" | jq_exec -c --arg p "${NODE_TAG[n]}" 'if index($p)==null then .+[$p] else . end') || return 1
     done
   fi
@@ -4758,10 +4769,10 @@ iface_menu() {
     printf '%s\n' "$oldout" > "$WORK_DIR/conf/01_outbounds.json"
     printf '%s\n' "$oldroute" > "$WORK_DIR/conf/03_route.json"
     cmd_systemctl reload sing-box >/dev/null 2>&1 || true
-    warning " Bind failed; restored previous config "
+    warning " $(i18n_message "绑定失败，已恢复原有配置" "Bind failed; restored previous config") "
     return 1
   fi
-  info " Updated per-protocol network interface "
+  info " $(i18n_message "已更新各协议的网络出口" "Updated per-protocol network interface") "
 }
 
 generate_sing_box_base_conf() {
@@ -4954,9 +4965,9 @@ EOF
 
 # 生成 sing-box 配置文件
 sing-box_json() {
-  node_names_apply_country || error " Unable to prepare VPS node names. "
+  node_names_apply_country || error " $(i18n_message "无法生成 VPS 节点名称。" "Unable to prepare VPS node names.") "
   # 重建旧配置前同步全局国旗及路由引用，避免新标签与旧规则失配。
-  node_name_replace_files "${NODE_NAME_CONFIRM:-}" '' country || error " Unable to update node country references. "
+  node_name_replace_files "${NODE_NAME_CONFIRM:-}" '' country || error " $(i18n_message "无法更新节点国家或地区信息。" "Unable to update node country references.") "
   local IS_CHANGE=$1
   mkdir -p ${WORK_DIR}/conf ${WORK_DIR}/logs ${WORK_DIR}/subscribe
 
@@ -7462,7 +7473,7 @@ change_protocols() {
       rm -f "$(iface_state)"
     fi
     rm -rf "$IFACE_SNAPSHOT_DIR"
-    warning " Protocol configuration validation failed; restored original configuration "
+    warning " $(i18n_message "协议配置校验失败，已恢复原有配置" "Protocol configuration validation failed; restored original configuration") "
     return 1
   fi
   # Keep the snapshot until the live service confirms successful reload.
@@ -7499,17 +7510,17 @@ change_protocols() {
 
   # Apply the new protocol set. Keep a restorable snapshot until healthy.
   if ! cmd_systemctl reload sing-box || ! cmd_systemctl status sing-box >/dev/null 2>&1; then
-    warning " Sing-box reload failed after protocol changes; restoring saved configuration "
+    warning " $(i18n_message "修改协议后重新加载 Sing-box 失败，正在恢复备份配置" "Sing-box reload failed after protocol changes; restoring saved configuration") "
     rm -rf "${WORK_DIR}/conf"
-    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf" || error " Configuration rollback failed "
+    cp -a "${IFACE_SNAPSHOT_DIR}/conf" "${WORK_DIR}/conf" || error " $(i18n_message "配置回退失败" "Configuration rollback failed") "
     if [ -f "${IFACE_SNAPSHOT_DIR}/state.json" ]; then
-      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)" || error " Interface state rollback failed "
+      cp -a "${IFACE_SNAPSHOT_DIR}/state.json" "$(iface_state)" || error " $(i18n_message "网卡绑定状态回退失败" "Interface state rollback failed") "
     else
       rm -f "$(iface_state)"
     fi
     cmd_systemctl reload sing-box >/dev/null 2>&1 || true
     rm -rf "$IFACE_SNAPSHOT_DIR"
-    warning " Previous sing-box configuration restored. Check Nginx, Argo and firewall if those changed. "
+    warning " $(i18n_message "已恢复之前的 Sing-box 配置。如同时修改了 Nginx、Argo 或防火墙，请检查它们的状态。" "Previous sing-box configuration restored. Check Nginx, Argo and firewall if those changed.") "
     return 1
   fi
   rm -rf "$IFACE_SNAPSHOT_DIR"
@@ -7682,13 +7693,13 @@ version() {
       STRATEGY=${STRATEGY:-prefer_ipv4}
       command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved && local IS_PREFER_GO=false || local IS_PREFER_GO=true
 
-      iface_migrate || error " Interface migration failed "
+      iface_migrate || error " $(i18n_message "网卡绑定配置迁移失败" "Interface migration failed") "
       # 备份旧基础配置
       for i in $(ls ${WORK_DIR}/conf/0*); do
         cp $i ${i}.bak
       done
       generate_sing_box_base_conf
-      iface_sync || error " Interface sync failed "
+      iface_sync || error " $(i18n_message "网卡绑定配置同步失败" "Interface sync failed") "
 
       if ! $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box check -C ${WORK_DIR}/conf >/dev/null; then
         for i in $(ls ${WORK_DIR}/conf/0*.bak); do
@@ -7940,7 +7951,9 @@ fi
 # L=${L:-E} 保证 -E / -C / --LANGUAGE 等显式指定仍然优先
 [ "$IS_UNINSTALL" = 'is_uninstall' ] && [ ! -s "${WORK_DIR}/language" ] && L=${L:-E}
 check_root
-[ "$IS_ARGO_MONITOR" = '1' ] && L=E
+# The monitor is non-interactive: honor the saved language when it exists.
+# On fresh installs without a language file, default to English without a prompt.
+[ "$IS_ARGO_MONITOR" = '1' ] && [ ! -s "${WORK_DIR}/language" ] && L=${L:-E}
 select_language
 check_system_info
 if [ "$1" = '--setup-argo-monitor' ]; then
