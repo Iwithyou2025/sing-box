@@ -27,8 +27,16 @@ ip() { :; }
 wget() {
   printf '%s\n' "$*" >> "$ROOT/lookups"
   case " $* " in
-    *' -4 '*) printf '%s\n' "$GEO4" ;;
-    *' -6 '*) printf '%s\n' "$GEO6" ;;
+    *ipdata.free*)
+      case " $* " in
+        *' -4 '*) printf '%s\n' "${GEO4_IPDATA:-$GEO4}" ;;
+        *' -6 '*) printf '%s\n' "${GEO6_IPDATA:-$GEO6}" ;;
+      esac ;;
+    *ip.cloudflare.now.cc*)
+      case " $* " in
+        *' -4 '*) printf '%s\n' "$GEO4" ;;
+        *' -6 '*) printf '%s\n' "$GEO6" ;;
+      esac ;;
     *) echo "Unexpected network request: $*" >&2; return 1 ;;
   esac
 }
@@ -207,6 +215,29 @@ for LOCALE_TEST in C C.UTF-8; do
   printf '%s\n' '{"ip":"198.51.100.2","emoji":"🇺🇸"}' > "$TEMP_DIR/ip4.json"
   check_system_ip
   assert_eq "${WAN4:-}${EMOJI4:-}" ''
+  # Dual-provider disagreement: ipdata country_code/flag wins for the same IPv4.
+  GEO4='{"ip":"192.0.2.44","country":"United States","emoji":"🇺🇸","isp":"Primary ISP"}'
+  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  unset SYSTEM_IP_CHECKED
+  check_system_ip
+  assert_eq "$WAN4" '192.0.2.44'
+  assert_eq "$EMOJI4" '🇩🇪'
+  assert_eq "$COUNTRY4" 'DE'
+  # When the providers agree, retain the primary response.
+  GEO4='{"ip":"192.0.2.44","country":"Germany","emoji":"🇩🇪","isp":"Primary ISP"}'
+  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  unset SYSTEM_IP_CHECKED
+  check_system_ip
+  assert_eq "$EMOJI4" '🇩🇪'
+  # If the primary source fails, use a valid ipdata response.
+  GEO4=''
+  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  unset SYSTEM_IP_CHECKED
+  check_system_ip
+  assert_eq "$WAN4" '192.0.2.44'
+  assert_eq "$EMOJI4" '🇩🇪'
+  GEO4='{"ip":"192.0.2.44","country":"Germany","emoji":"🇩🇪","isp":"Primary ISP"}'
+  unset GEO4_IPDATA
   # IPv6-only + pretty JSON; new GeoIP beats an old global cache.
   mv "$WORK_DIR/cache.saved" "$WORK_DIR/vps-country-flag"
   GEO6=$'{\n "emoji": "🇫🇷",\n "isp": "Native",\n "country": "France",\n "ip": "2001:db8::44"\n}'
