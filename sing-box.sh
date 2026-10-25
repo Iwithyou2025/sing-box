@@ -2316,6 +2316,11 @@ change_argo() {
   for JSON_FILE in tunnel.json tunnel.yml; do
     [ -f "$WORK_DIR/$JSON_FILE" ] && cp -p "$WORK_DIR/$JSON_FILE" "$STAGE/$JSON_FILE"
   done
+  if [ "$OPTION" = 2 ] && [ -n "$NEW_DOMAIN" ]; then
+    [ -d "$WORK_DIR/conf" ] && cp -a "$WORK_DIR/conf" "$STAGE/conf"
+    [ -d "$WORK_DIR/subscribe" ] && cp -a "$WORK_DIR/subscribe" "$STAGE/subscribe"
+    [ -f "$WORK_DIR/list" ] && cp -p "$WORK_DIR/list" "$STAGE/list"
+  fi
   if [ "$OPTION" = 2 ]; then
     if [ "$TYPE" = Token ]; then
       [[ "$NEW_AUTH" =~ ^[A-Za-z0-9_=-]{120,250}$ ]] || {
@@ -2336,22 +2341,22 @@ change_argo() {
         warning " Invalid JSON credentials; unchanged. "
         rm -rf "$STAGE"; return 1
       fi
-      # 先生成候选 YAML，避免新旧认证文件交叉使用。
-      local TUNNEL_ID DOMAIN
+      # 保留原有 ingress / 回源路由，只替换隧道 ID 与用户明确修改的主域名。
+      local TUNNEL_ID
       TUNNEL_ID=$("$WORK_DIR/jq" -r '.TunnelID' "$STAGE/new.json")
-      DOMAIN=$NEW_DOMAIN
-      [ -n "$DOMAIN" ] || DOMAIN=$(sed -n 's/^[[:space:]]*-[[:space:]]*hostname:[[:space:]]*//p' "$WORK_DIR/tunnel.yml" | head -n 1)
-      [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ && "$DOMAIN" == *.* ]] || {
-        warning " Missing valid fixed domain; unchanged. "; rm -rf "$STAGE"; return 1;
-      }
-      cat > "$STAGE/new.yml" <<EOF
-tunnel: $TUNNEL_ID
-credentials-file: $WORK_DIR/tunnel.json
-ingress:
-  - hostname: $DOMAIN
-    service: http://localhost:$PORT_NGINX
-  - service: http_status:404
-EOF
+      if [[ ! "$TUNNEL_ID" =~ ^[a-zA-Z0-9-]+$ ]] ||
+         [ ! -s "$WORK_DIR/tunnel.yml" ] ||
+         ! grep -q '^tunnel:' "$WORK_DIR/tunnel.yml"; then
+        warning " Missing existing tunnel configuration or invalid tunnel ID. "
+        rm -rf "$STAGE"
+        return 1
+      fi
+      cp "$WORK_DIR/tunnel.yml" "$STAGE/new.yml" || { rm -rf "$STAGE"; return 1; }
+      sed -i -E "s|^tunnel:.*|tunnel: $TUNNEL_ID|" "$STAGE/new.yml"
+      if [ -n "$NEW_DOMAIN" ]; then
+        grep -q 'hostname:' "$STAGE/new.yml" || { warning " No hostname to replace. "; rm -rf "$STAGE"; return 1; }
+        sed -i -E "0,/hostname:[[:space:]]*[^[:space:]]+/s|hostname:[[:space:]]*[^[:space:]]+|hostname: $NEW_DOMAIN|" "$STAGE/new.yml"
+      fi
       ARGO_NEW_ARGS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --protocol http2 --config $WORK_DIR/tunnel.yml run"
     fi
   fi
@@ -2446,7 +2451,18 @@ EOF
         sed -i -E "s|(\\\"VMESS_HOST_DOMAIN\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|;s|(\\\"server_name\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|" "$JSON_FILE"
       done
       ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 IS_ARGO_MONITOR=1 export_list || {
-        warning " Tunnel changed, but subscription refresh failed. "
+        warning " Tunnel changed, but subscription refresh failed; restore old tunnel and subscriber files. "
+        cp -p "$STAGE/service" "$ARGO_DAEMON_FILE"
+        if [ "$TYPE" = Json ]; then
+          for JSON_FILE in tunnel.json tunnel.yml; do
+            [ -f "$STAGE/$JSON_FILE" ] && cp -p "$STAGE/$JSON_FILE" "$WORK_DIR/$JSON_FILE"
+          done
+        fi
+        [ -d "$STAGE/conf" ] && cp -a "$STAGE/conf/." "$WORK_DIR/conf/"
+        [ -d "$STAGE/subscribe" ] && cp -a "$STAGE/subscribe/." "$WORK_DIR/subscribe/"
+        [ -f "$STAGE/list" ] && cp -p "$STAGE/list" "$WORK_DIR/list"
+        [ "$SYSTEM" != Alpine ] && systemctl daemon-reload
+        [ "$WAS_RUNNING" = 1 ] && cmd_systemctl restart argo
         CHANGE_STATUS=1
       }
     fi
@@ -2456,6 +2472,9 @@ EOF
   }
   rm -rf "$STAGE"
   [ "$CHANGE_STATUS" = 0 ] || return 1
+  if [ "$OPTION" = 2 ]; then
+    hint " If credentials belong to a new fixed tunnel, verify Cloudflare DNS and ingress mapping. "
+  fi
   info " Argo: $TYPE operation completed. "
 }
 
