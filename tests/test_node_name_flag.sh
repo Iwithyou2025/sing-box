@@ -242,7 +242,12 @@ for LOCALE_TEST in C C.UTF-8; do
   mv "$WORK_DIR/cache.saved" "$WORK_DIR/vps-country-flag"
   GEO4=''
   GEO4_IPDATA=''
-  GEO6=\n "isp": "Native",\n "country": "France",\n "ip": "2001:db8::44"\n}'
+  GEO6=$'{
+ "emoji": "🇫🇷",
+ "isp": "Native",
+ "country": "France",
+ "ip": "2001:db8::44"
+}'
   unset SYSTEM_IP_CHECKED
   node_country_flag_load
   assert_eq "$NODE_COUNTRY_FLAG" '🇫🇷'
