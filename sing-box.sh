@@ -5450,7 +5450,7 @@ fetch_nodes_value() {
   [[ -z "$NODE_NAME_CONFIRM" && -s ${WORK_DIR}/subscribe/clash ]] && NODE_NAME_CONFIRM=$(awk -F "'" '/u: &u/{print $2; exit}' ${WORK_DIR}/subscribe/clash)
 
   # 如有 Argo，获取 Argo Tunnel
-  [[ ${STATUS[1]} =~ $(text 27)|$(text 28) ]] && grep -q '\--url' ${ARGO_DAEMON_FILE} && { cmd_systemctl enable argo; sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain; }
+  argo_refresh_domain_for_export
 
   # 获取 UUID_CONFIRM（从 JSON 配置文件读取，不依赖 nginx）
   # 如 UUID_CONFIRM 已有值（例如上层已交互输入），跳过 JSON 读取，避免重复弹窗
@@ -7090,10 +7090,24 @@ download_cloudflared() {
   return 1
 }
 
+# 导出节点时刷新 Quick Tunnel 域名；普通导出维持原有的启动行为。
+# 更新流程已经主动刷新过域名，此时必须跳过 enable --now，避免改变开机自启状态。
+argo_refresh_domain_for_export() {
+  [[ ${STATUS[1]} =~ $(text 27)|$(text 28) ]] || return 0
+  grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
+  [ "${ARGO_UPDATE_PRESERVE_SERVICE_STATE:-0}" = 1 ] && return 0
+  cmd_systemctl enable argo
+  sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain
+}
+
 # 更新或回退后的 Quick Tunnel 都可能更换域名，共用现有同步逻辑。
 argo_update_refresh_domain() {
   grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
-  (unset ARGO_MONITOR_VERIFIED_DOMAIN; fetch_quicktunnel_domain && export_list) || {
+  (
+    unset ARGO_MONITOR_VERIFIED_DOMAIN
+    ARGO_UPDATE_PRESERVE_SERVICE_STATE=1
+    fetch_quicktunnel_domain && export_list
+  ) || {
     warning " $(text 201) "
     return 1
   }
