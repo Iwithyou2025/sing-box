@@ -59,7 +59,7 @@ fi
 python3 - <<'PY'
 from pathlib import Path
 s=Path('sing-box.sh').read_text()
-assert """[ "$IS_ARGO_MONITOR" = '1' ] && [ ! -s "\${WORK_DIR}/language" ] && L=\${L:-E}""" in s
+assert """[ "$IS_ARGO_MONITOR" = '1' ] && [ ! -s "${WORK_DIR}/language" ] && L=${L:-E}""" in s
 assert 'value_label=$(i18n_message' in s
 assert """printf "$(i18n_message '[argo-monitor] 已完成""" in s
 assert """printf "$(i18n_message '[subscription] 生成文件为空""" in s
