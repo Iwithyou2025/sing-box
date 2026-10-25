@@ -2387,6 +2387,7 @@ argo_change_run() (
     }
     ARGO_JSON="$JSON" ARGO_DOMAIN="$NEW_DOMAIN" export_argo_json_file "$STAGE"
     [ -s "$STAGE/tunnel.json" ] && [ -s "$STAGE/tunnel.yml" ] || return 1
+    chmod 600 "$STAGE/tunnel.json" || return 1
     NEW_ARGS="--edge-ip-version auto --protocol http2 --config $WORK_DIR/tunnel.yml run"
   fi
 
@@ -2441,26 +2442,49 @@ change_argo() {
   elif [ "$TYPE" = Json ] && [ -z "$OLD_DOMAIN" ]; then
     OLD_DOMAIN=$(awk '/hostname:/{print $2;exit}' "$WORK_DIR/tunnel.yml" 2>/dev/null)
   fi
-  info " Argo type: $TYPE "
-  info " Domain: ${OLD_DOMAIN:-unknown} "
+  if [ "${L:-E}" = C ]; then
+    info " 当前 Argo 类型：$TYPE "
+    info " 当前域名：${OLD_DOMAIN:-未知} "
+  else
+    info " Argo type: $TYPE "
+    info " Domain: ${OLD_DOMAIN:-unknown} "
+  fi
   if [ "$TYPE" = Try ]; then
-    reading " Rebuild current Quick Tunnel? [y/N]: " CHOICE
+    if [ "${L:-E}" = C ]; then
+      reading " 是否重新建立当前临时隧道？[y/N]: " CHOICE
+    else
+      reading " Rebuild current Quick Tunnel? [y/N]: " CHOICE
+    fi
     [[ "$CHOICE" == y || "$CHOICE" == Y ]] || return 0
     argo_change_run Try rebuild "$OLD_DOMAIN" '' ''
     return $?
   fi
-  hint " 1. Reconnect current tunnel (keep authentication and domain) "
-  hint " 2. Replace credentials / domain (keep $TYPE mode) "
-  reading " Please choose [1]: " CHOICE
+  if [ "${L:-E}" = C ]; then
+    hint " 1. 重连当前隧道（保留认证信息和域名） "
+    hint " 2. 更换认证信息 / 域名（保留 $TYPE 类型） "
+    reading " 请选择 [1]: " CHOICE
+  else
+    hint " 1. Reconnect current tunnel (keep authentication and domain) "
+    hint " 2. Replace credentials / domain (keep $TYPE mode) "
+    reading " Please choose [1]: " CHOICE
+  fi
   case "${CHOICE:-1}" in
     1) argo_change_run "$TYPE" reconnect "$OLD_DOMAIN" '' ''; return $? ;;
     2) ;;
     *) warning " Invalid option; no changes made. "; return 1 ;;
   esac
-  reading " New domain (leave blank to keep ${OLD_DOMAIN:-unset}): " NEW_DOMAIN
+  if [ "${L:-E}" = C ]; then
+    reading " 新域名（留空保持 ${OLD_DOMAIN:-原有域名}）: " NEW_DOMAIN
+  else
+    reading " New domain (leave blank to keep ${OLD_DOMAIN:-unset}): " NEW_DOMAIN
+  fi
   NEW_DOMAIN=${NEW_DOMAIN:-$OLD_DOMAIN}
   argo_change_valid_domain "$NEW_DOMAIN" || { warning " Invalid fixed domain. "; return 1; }
-  reading " New $TYPE credential (Token, JSON or Cloudflare API token): " AUTH
+  if [ "${L:-E}" = C ]; then
+    reading " 输入新的 $TYPE 认证信息（或 Cloudflare API Token）: " AUTH
+  else
+    reading " New $TYPE credential (Token, JSON or Cloudflare API token): " AUTH
+  fi
   [ -n "$AUTH" ] || { warning " Empty credentials; no changes made. "; return 1; }
   argo_change_run "$TYPE" replace "$OLD_DOMAIN" "$NEW_DOMAIN" "$AUTH"
 }
