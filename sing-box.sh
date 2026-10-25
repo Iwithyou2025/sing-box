@@ -7,7 +7,7 @@ VERSION='v1.3.27 (2026.10.18)'
 GITHUB_PROXY=('https://ghproxy.lvedong.eu.org/' 'https://accel.cloudflare.nyc.mn/')
 
 # 各变量默认值
-TEMP_DIR='/tmp/sing-box'
+TEMP_DIR=$(mktemp -d /tmp/sing-box.XXXXXXXX) || exit 1
 WORK_DIR='/etc/sing-box'
 FIREWALL_STATE_DIR="${WORK_DIR}/firewall"
 SERVICE_FIREWALL_STATE_FILE="${FIREWALL_STATE_DIR}/service_ports.list"
@@ -2270,6 +2270,49 @@ argo_change_type() {
   esac
 }
 
+# One-shot Quick Tunnel hostname retrieval for MANUAL switching only.
+argo_manual_live_domain() {
+  local PID ADDR HOST
+  PID=$(ps -eo pid,args | awk -v dir="$WORK_DIR" '$0 ~ (dir "/cloudflared") {print $1;exit}')
+  [[ "$PID" =~ ^[0-9]+$ ]] || return 1
+  ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
+  [ -n "$ADDR" ] || return 1
+  HOST=$(wget -qO- --timeout=1 --tries=1 "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}') || return 1
+  [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  printf '%s\n' "$HOST"
+}
+
+# One HTTPS GET, single attempt, 1s total timeout; retain original curl diagnostics.
+argo_manual_domain_healthy() {
+  local DOMAIN="$1" CODE RC
+  command -v curl >/dev/null 2>&1 || { warning " curl is missing "; return 1; }
+  CODE=$(curl -sS -L --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    warning " HTTPS request failed: curl exit $RC "
+    return 1
+  fi
+  [[ "$CODE" =~ ^2[0-9][0-9]$ ]] || { warning " HTTPS returned HTTP $CODE "; return 1; }
+  info " HTTPS $CODE "
+}
+
+# Only reuse subscription publication; do not invoke the monitor's wait/health/rebuild path.
+argo_manual_publish_domain() {
+  local NEW="$1" OLD="$2" SNAPSHOT
+  SNAPSHOT=$(mktemp -d "$WORK_DIR/.argo-manual-publish.XXXXXXXX") || return 1
+  [ -f "$WORK_DIR/argo-domain" ] && cp -p "$WORK_DIR/argo-domain" "$SNAPSHOT/argo-domain"
+  cp -a "$WORK_DIR/conf" "$SNAPSHOT/conf" || { rm -rf "$SNAPSHOT"; return 1; }
+  if (ARGO_MONITOR_VERIFIED_DOMAIN="$NEW"; fetch_quicktunnel_domain && export_list >/dev/null); then
+    rm -rf "$SNAPSHOT"
+    return 0
+  fi
+  [ -f "$SNAPSHOT/argo-domain" ] && cp -p "$SNAPSHOT/argo-domain" "$WORK_DIR/argo-domain" || rm -f "$WORK_DIR/argo-domain"
+  cp -a "$SNAPSHOT/conf/." "$WORK_DIR/conf/"
+  rm -rf "$SNAPSHOT"
+  warning " Subscription update failed; previous domain references restored. "
+  return 1
+}
+
 # 供手动操作和自动监控共用的互斥标记。
 argo_change_lock() {
   local PID
@@ -2344,10 +2387,20 @@ argo_change_run() (
   }
 
   if [ "$TYPE" = Try ]; then
-    cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1 || return 1
-    LIVE=$(argo_monitor_wait_domain) || { warning " No Quick Tunnel hostname after restart. "; return 1; }
-    ARGO_CHANGE_ALLOW_PUBLISH=1 ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_monitor_publish_domain "$LIVE" "$OLD_DOMAIN"
-    return $?
+    info " Restarting Argo... "
+    cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1 || return 1
+    LIVE=$(argo_manual_live_domain) || {
+      warning " Quick Tunnel hostname not ready (single 1-second request); subscriptions unchanged. "
+      return 1
+    }
+    info " New Argo domain: $LIVE "
+    argo_manual_domain_healthy "$LIVE" || {
+      warning " Quick Tunnel HTTPS single 1-second check failed; subscriptions unchanged. "
+      return 1
+    }
+    ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
+    info " Argo changed and subscriptions updated. "
+    return 0
   fi
   if [ "$ACTION" = reconnect ]; then
     cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1
@@ -2593,16 +2646,7 @@ check_install() {
     fi
   fi
 
-  # 并发下载订阅模板 (clash, clash2, sing-box-template)，在新安装和更换协议时会用到
-  # 卸载模式跳过：纯浪费，且网络不通时会白白等待
-  if [ "$IS_UNINSTALL" != 'is_uninstall' ]; then
-    {
-      wget --no-check-certificate --continue --tries=2 --timeout=10 -qO $TEMP_DIR/clash ${GH_PROXY}${SUBSCRIBE_TEMPLATE}/clash 2>/dev/null &
-      wget --no-check-certificate --continue --tries=2 --timeout=10 -qO $TEMP_DIR/clash2 ${GH_PROXY}${SUBSCRIBE_TEMPLATE}/clash2 2>/dev/null &
-      wget --no-check-certificate --continue --tries=2 --timeout=10 -qO $TEMP_DIR/sing-box-template ${GH_PROXY}${SUBSCRIBE_TEMPLATE}/sing-box 2>/dev/null &
-      wait
-    } &
-  fi
+  # 订阅模板改由安全导出流程同步准备，避免后台下载竞态。
 
   # 如果有需要，后台静默下载 sing-box（卸载模式跳过）
   if [ "${STATUS[0]}" = "$(text 26)" ] && [ ! -s ${WORK_DIR}/sing-box ] && [ "$IS_UNINSTALL" != 'is_uninstall' ]; then
@@ -6129,7 +6173,127 @@ install_sing-box() {
   fi
 }
 
+subscription_template_valid() {
+  local kind="$1" file="$2"
+  [ -s "$file" ] || return 1
+  case "$kind" in
+    clash) grep -q '^proxy-providers:' "$file" && grep -q 'PROXY_PROVIDERS_URL' "$file" ;;
+    clash2) grep -q '^proxies:' "$file" && grep -q '^proxy-groups:' "$file" && grep -q '^rules:' "$file" ;;
+    sing-box-template) grep -Fq '"<OUTBOUND_REPLACE>"' "$file" && grep -Fq '"<NODE_REPLACE>"' "$file" ;;
+    *) return 1 ;;
+  esac
+}
+
+subscription_prepare_templates() {
+  local stage="$1" name dest url cache="$WORK_DIR/.subscription-templates"
+  mkdir -p "$stage/templates" "$cache" || return 1
+  for name in clash clash2 sing-box-template; do
+    dest="$stage/templates/$name"
+    if subscription_template_valid "$name" "$cache/$name"; then
+      cp "$cache/$name" "$dest" || return 1
+    elif subscription_template_valid "$name" "$TEMP_DIR/$name"; then
+      cp "$TEMP_DIR/$name" "$dest" || return 1
+    else
+      [ "$name" = sing-box-template ] && url=sing-box || url=$name
+      wget --no-check-certificate --tries=1 --timeout=6 -qO "$dest" "${GH_PROXY}${SUBSCRIBE_TEMPLATE}/$url" 2>/dev/null || {
+        printf '[subscription] download failed: %s\n' "$name" >&2; return 1;
+      }
+    fi
+    subscription_template_valid "$name" "$dest" || { printf '[subscription] invalid template: %s\n' "$name" >&2; return 1; }
+    if ! subscription_template_valid "$name" "$cache/$name"; then cp "$dest" "$cache/$name" || return 1; fi
+  done
+}
+
+subscription_lock_acquire() {
+  exec {SUBSCRIPTION_LOCK_FD}>"$WORK_DIR/.subscription-export.lock" || return 1
+  if ! flock -w 15 "$SUBSCRIPTION_LOCK_FD"; then
+    echo '[subscription] another export is still running' >&2
+    exec {SUBSCRIPTION_LOCK_FD}>&-
+    unset SUBSCRIPTION_LOCK_FD
+    return 1
+  fi
+}
+subscription_lock_release() {
+  if [ -n "${SUBSCRIPTION_LOCK_FD:-}" ]; then
+    flock -u "$SUBSCRIPTION_LOCK_FD" || true
+    exec {SUBSCRIPTION_LOCK_FD}>&-
+    unset SUBSCRIPTION_LOCK_FD
+  fi
+}
+
+subscription_stage_valid() {
+  local dir="$1" name
+  for name in proxies clash clash2 sing-box v2rayn throne shadowrocket list; do
+    [ -s "$dir/$name" ] || { printf '[subscription] empty output: %s\n' "$name" >&2; return 1; }
+  done
+  grep -q '^proxy-providers:' "$dir/clash" &&
+    grep -q '^proxy-groups:' "$dir/clash2" || return 1
+  "$WORK_DIR/jq" -e 'type == "object" and (.outbounds | type == "array")' "$dir/sing-box" >/dev/null 2>&1 || {
+    echo '[subscription] invalid sing-box output JSON' >&2
+    return 1
+  }
+  [ ! -f "$dir/qr" ] || [ -s "$dir/qr" ]
+}
+
+subscription_publish() {
+  local dir="$1" backup="$2" name tmp count=0
+  local -a files=(proxies clash clash2 sing-box v2rayn throne shadowrocket list)
+  [ -s "$dir/qr" ] && files+=(qr)
+  mkdir -p "$WORK_DIR/subscribe" "$backup/old" || return 1
+  for name in "${files[@]}"; do
+    if [ "$name" = list ]; then
+      [ ! -f "$WORK_DIR/list" ] || cp -p "$WORK_DIR/list" "$backup/old/list" || return 1
+    else
+      [ ! -f "$WORK_DIR/subscribe/$name" ] || cp -p "$WORK_DIR/subscribe/$name" "$backup/old/$name" || return 1
+    fi
+  done
+  for name in "${files[@]}"; do
+    if [ "$name" = list ]; then
+      tmp="$WORK_DIR/.list.next.$BASHPID"
+      cp "$dir/list" "$tmp" && mv -f "$tmp" "$WORK_DIR/list" || break
+    else
+      tmp="$WORK_DIR/subscribe/.$name.next.$BASHPID"
+      cp "$dir/$name" "$tmp" && mv -f "$tmp" "$WORK_DIR/subscribe/$name" || break
+    fi
+    ((count+=1))
+  done
+  if [ "$count" -ne "${#files[@]}" ]; then
+    rm -f "$tmp"
+    for name in "${files[@]:0:count}"; do
+      if [ "$name" = list ]; then
+        [ ! -f "$backup/old/list" ] || cp -p "$backup/old/list" "$WORK_DIR/list"
+        [ -f "$backup/old/list" ] || rm -f "$WORK_DIR/list"
+      else
+        [ ! -f "$backup/old/$name" ] || cp -p "$backup/old/$name" "$WORK_DIR/subscribe/$name"
+        [ -f "$backup/old/$name" ] || rm -f "$WORK_DIR/subscribe/$name"
+      fi
+    done
+    echo '[subscription] publish failed; previous files restored' >&2
+    return 1
+  fi
+}
+
+# sb -n, manual switching, auto monitoring, and initial install share one safe export.
 export_list() {
+  local stage result=0
+  subscription_lock_acquire || return 1
+  stage=$(mktemp -d "$WORK_DIR/.subscription-export.XXXXXXXX") || { subscription_lock_release; return 1; }
+  mkdir -p "$stage/output" || result=1
+  if [ "$result" = 0 ]; then
+    check_install
+    subscription_prepare_templates "$stage" || result=1
+  fi
+  if [ "$result" = 0 ]; then
+    SUBSCRIBE_OUTPUT_DIR="$stage/output" SUBSCRIBE_TEMPLATE_WORK_DIR="$stage/templates" export_list_impl "$@" || result=1
+  fi
+  if [ "$result" = 0 ]; then subscription_stage_valid "$stage/output" || result=1; fi
+  if [ "$result" = 0 ]; then subscription_publish "$stage/output" "$stage" || result=1; fi
+  rm -rf "$stage"
+  subscription_lock_release
+  if [ "$result" != 0 ]; then echo '[subscription] export aborted; existing files kept' >&2; return 1; fi
+}
+
+export_list_impl() {
   IS_INSTALL=$1
 
   check_install
@@ -6301,25 +6465,24 @@ export_list() {
   $CLASH_ANYTLS
 "
 
-  echo -n "${CLASH_SUBSCRIBE}" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' > ${WORK_DIR}/subscribe/proxies
+  echo -n "${CLASH_SUBSCRIBE}" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' > ${SUBSCRIBE_OUTPUT_DIR}/proxies
 
   # 后台生成 clash 订阅配置文件
   {
     # 模板1: 使用 proxy providers
-    cat ${TEMP_DIR}/clash | sed "s#NODE_NAME#${NODE_NAME_CONFIRM}#g; s#PROXY_PROVIDERS_URL#$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/proxies#" > ${WORK_DIR}/subscribe/clash
+    cat ${SUBSCRIBE_TEMPLATE_WORK_DIR}/clash | sed "s#NODE_NAME#${NODE_NAME_CONFIRM}#g; s#PROXY_PROVIDERS_URL#$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/proxies#" > ${SUBSCRIBE_OUTPUT_DIR}/clash
 
     # 模板2: 不使用 proxy providers
     CLASH2_PORT=("$PORT_XTLS_REALITY" "$PORT_HYSTERIA2" "$PORT_TUIC" "$PORT_SHADOWTLS" "$PORT_SHADOWSOCKS" "$PORT_TROJAN" "$PORT_VMESS_WS" "$PORT_VLESS_WS" "$PORT_GRPC_REALITY" "$PORT_ANYTLS")
     CLASH2_PROXY_INSERT=("$CLASH_XTLS_REALITY" "$CLASH_HYSTERIA2" "$CLASH_TUIC" "$CLASH_SHADOWTLS" "$CLASH_SHADOWSOCKS" "$CLASH_TROJAN" "$CLASH_VMESS_WS" "$CLASH_VLESS_WS" "$CLASH_GRPC_REALITY" "$CLASH_ANYTLS")
     CLASH2_PROXY_GROUPS_INSERT=("- ${NODE_NAME[11]} ${NODE_TAG[0]}" "- ${NODE_NAME[12]} ${NODE_TAG[1]}" "- ${NODE_NAME[13]} ${NODE_TAG[2]}" "- ${NODE_NAME[14]} ${NODE_TAG[3]}" "- ${NODE_NAME[15]} ${NODE_TAG[4]}" "- ${NODE_NAME[16]} ${NODE_TAG[5]}" "- ${NODE_NAME[17]} ${NODE_TAG[6]}" "- ${NODE_NAME[18]} ${NODE_TAG[7]}" "- ${NODE_NAME[20]} ${NODE_TAG[9]}" "- ${NODE_NAME[21]} ${NODE_TAG[10]}")
 
-    CLASH2_YAML=$(cat ${TEMP_DIR}/clash2)
+    CLASH2_YAML=$(cat ${SUBSCRIBE_TEMPLATE_WORK_DIR}/clash2)
     for x in ${!CLASH2_PORT[@]}; do
       [[ ${CLASH2_PORT[x]} =~ [0-9]+ ]] && { CLASH2_YAML=$(sed "/proxy-groups:/i\  ${CLASH2_PROXY_INSERT[x]}" <<< "$CLASH2_YAML"); CLASH2_YAML=$(sed -E "/- name: (♻️ 自动选择|📲 电报消息|💬 OpenAi|📹 油管视频|🎥 奈飞视频|📺 巴哈姆特|📺 哔哩哔哩|🌍 国外媒体|🌏 国内媒体|📢 谷歌FCM|Ⓜ️ 微软Bing|Ⓜ️ 微软云盘|Ⓜ️ 微软服务|🍎 苹果服务|🎮 游戏平台|🎶 网易音乐|🎯 全球直连)|^rules:$/i\      ${CLASH2_PROXY_GROUPS_INSERT[x]}" <<< "$CLASH2_YAML"); }
     done
-    echo "$CLASH2_YAML" > ${WORK_DIR}/subscribe/clash2
+    echo "$CLASH2_YAML" > ${SUBSCRIBE_OUTPUT_DIR}/clash2
 
-    rm -f ${TEMP_DIR}/clash{,2}
   } &>/dev/null
 
   # 生成 ShadowRocket 订阅配置文件
@@ -6403,7 +6566,7 @@ http2://$(echo -n "${UUID[22]}:${UUID[22]}@${SERVER_IP_2}:${PORT_NAIVE}" | base6
 
 http3://$(echo -n "${UUID[22]}:${UUID[22]}@${SERVER_IP_2}:${PORT_NAIVE}" | base64 -w0)?peer=${TLS_SERVER}&alpn=h3&padding=1&hpkp=${SELF_SIGNED_200_FINGERPRINT_SHA256}#${NODE_NAME[22]// /%20}%20${NODE_TAG[11]}%20http3
 "
-  echo -n "$SHADOWROCKET_SUBSCRIBE" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' | base64 -w0 > ${WORK_DIR}/subscribe/shadowrocket
+  echo -n "$SHADOWROCKET_SUBSCRIBE" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' | base64 -w0 > ${SUBSCRIBE_OUTPUT_DIR}/shadowrocket
 
   # 生成 V2rayN 订阅文件
   [ -n "$PORT_XTLS_REALITY" ] && local V2RAYN_SUBSCRIBE+="
@@ -6532,7 +6695,7 @@ v2rayn://naive/$(echo -n "{\"ConfigType\":12,\"CoreType\":24,\"ConfigVersion\":4
 ----------------------------
 v2rayn://naive/$(echo -n "{\"ConfigType\":12,\"CoreType\":24,\"ConfigVersion\":4,\"Remarks\":\"${NODE_NAME[22]} ${NODE_TAG[11]} quic\",\"Address\":\"${SERVER_IP}\",\"Port\":${PORT_NAIVE},\"Password\":\"${UUID[22]}\",\"Username\":\"${UUID[22]}\",\"StreamSecurity\":\"tls\",\"AllowInsecure\":\"false\",\"Sni\":\"${TLS_SERVER}\",\"Cert\":\"${CERT_200_URL_2}\",\"ProtoExtraObj\":{\"CongestionControl\":\"bbr\",\"NaiveQuic\":true}}" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
 
-  echo -n "$V2RAYN_SUBSCRIBE" | sed '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/d' | sed -E '/^[ ]*#|^[ ]+|^\{|^\}/d' | sed '/^$/d' | base64 -w0 > ${WORK_DIR}/subscribe/v2rayn
+  echo -n "$V2RAYN_SUBSCRIBE" | sed '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/d' | sed -E '/^[ ]*#|^[ ]+|^\{|^\}/d' | sed '/^$/d' | base64 -w0 > ${SUBSCRIBE_OUTPUT_DIR}/v2rayn
 
   # 生成 Throne 订阅文件
   [ -n "$PORT_XTLS_REALITY" ] && local THRONE_SUBSCRIBE+="
@@ -6626,7 +6789,7 @@ naive+https://${UUID[22]}:${UUID[22]}@${SERVER_IP_1}:${PORT_NAIVE}?uot=1&securit
 naive+quic://${UUID[22]}:${UUID[22]}@${SERVER_IP_1}:${PORT_NAIVE}?congestion_control=bbr&security=tls&sni=${TLS_SERVER}&tls_certificate=${CERT_200_URL_1}#${NODE_NAME[22]// /%20}%20${NODE_TAG[11]}%20quic"
   }
 
-  echo -n "$THRONE_SUBSCRIBE" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' | base64 -w0 > ${WORK_DIR}/subscribe/throne
+  echo -n "$THRONE_SUBSCRIBE" | sed -E '/^[ ]*#|^--/d' | sed '/^$/d' | base64 -w0 > ${SUBSCRIBE_OUTPUT_DIR}/throne
 
   # 生成 Sing-box 订阅文件
   [ -n "$PORT_XTLS_REALITY" ] &&
@@ -6723,13 +6886,11 @@ naive+quic://${UUID[22]}:${UUID[22]}@${SERVER_IP_1}:${PORT_NAIVE}?congestion_con
 
   {
     # 生成 sing-box SFM SFA SFI 订阅文件
-    [ ! -s "$TEMP_DIR/sing-box-template" ] && wget --no-check-certificate --continue --tries=2 --timeout=10 -qO "$TEMP_DIR/sing-box-template" "${GH_PROXY}${SUBSCRIBE_TEMPLATE}/sing-box" 2>/dev/null
-    cat $TEMP_DIR/sing-box-template | sed "s#\"<OUTBOUND_REPLACE>\",#$OUTBOUND_REPLACE#; s#\"<NODE_REPLACE>\"#${NODE_REPLACE%,}#g" | ${WORK_DIR}/jq > ${WORK_DIR}/subscribe/sing-box
-    rm -f $TEMP_DIR/sing-box-template
+    cat $SUBSCRIBE_TEMPLATE_WORK_DIR/sing-box-template | sed "s#\"<OUTBOUND_REPLACE>\",#$OUTBOUND_REPLACE#; s#\"<NODE_REPLACE>\"#${NODE_REPLACE%,}#g" | ${WORK_DIR}/jq > ${SUBSCRIBE_OUTPUT_DIR}/sing-box
   } &>/dev/null
 
   # 生成二维码 url 文件
-  [ "$IS_SUB" = 'is_sub' ] && cat > ${WORK_DIR}/subscribe/qr << EOF
+  [ "$IS_SUB" = 'is_sub' ] && cat > ${SUBSCRIBE_OUTPUT_DIR}/qr << EOF
 $(text 81):
 $(text 82) 1:
 $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto
@@ -6875,8 +7036,8 @@ $(hint "⬆ Outbound (total):  $(format_traffic $OUT_SUM)")
   # === 结束 ===
 
   # 生成并显示节点信息
-  echo "$EXPORT_LIST_FILE" > ${WORK_DIR}/list
-  cat ${WORK_DIR}/list
+  echo "$EXPORT_LIST_FILE" > "$SUBSCRIBE_OUTPUT_DIR/list"
+  cat "$SUBSCRIBE_OUTPUT_DIR/list"
 
   [ "$IS_ARGO_MONITOR" != '1' ] && argo_monitor_sync
   # 显示脚本使用情况数据

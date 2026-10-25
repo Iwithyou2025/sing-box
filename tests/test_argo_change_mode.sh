@@ -19,8 +19,9 @@ check_install() { :; }
 fetch_nodes_value() { ARGO_DOMAIN=old.example.com; PORT_NGINX=8000; }
 sleep() { :; }; systemctl() { :; }
 curl() { if [ "$HTTPS" = 1 ]; then echo 200; else echo 503; fi; }
-argo_monitor_wait_domain() { echo new.trycloudflare.com; }
-argo_monitor_publish_domain() { [ "$ARGO_CHANGE_ALLOW_PUBLISH" = 1 ] && echo "$1" > "$WORK_DIR/argo-domain"; }
+argo_manual_live_domain() { echo new.trycloudflare.com; }
+argo_manual_domain_healthy() { [ "$HTTPS" = 1 ]; }
+argo_manual_publish_domain() { [ "$EXPORT" = 1 ] && echo "$1" > "$WORK_DIR/argo-domain"; }
 create_argo_tunnel() { echo API >> "$EVENTS"; ARGO_TOKEN=$TOKEN_NEW; ARGO_JSON=$JSON_NEW; }
 export_list() { [ "$EXPORT" = 1 ] || return 1; echo updated > "$WORK_DIR/subscribe/output"; }
 cmd_systemctl() {

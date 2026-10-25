@@ -9,7 +9,9 @@ s=Path('sing-box.sh').read_text()
 for name in ['input_node_name','node_country_flag_valid','node_country_flag_from_name',
              'node_country_flag_load','node_name_with_flag','node_names_apply_country',
              'node_name_replace_files','change_config','check_system_ip','system_ip_field',
-             'is_valid_server_addr','sing-box_json','fetch_nodes_value','export_list',
+             'is_valid_server_addr','sing-box_json','fetch_nodes_value','export_list','export_list_impl',
+             'subscription_template_valid','subscription_prepare_templates','subscription_lock_acquire',
+             'subscription_lock_release','subscription_stage_valid','subscription_publish',
              'sync_hy2_warp_route','asc','format_uri_host','format_ports_display','jq_exec','multiplex_json','load_multiplex_state']:
     match=re.search(r'^'+re.escape(name)+r'\(\) \{',s,re.M)
     if not match: raise SystemExit('Missing function: '+name)
