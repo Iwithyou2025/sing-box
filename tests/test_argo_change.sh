@@ -109,4 +109,17 @@ printf 'ExecStart=/etc/sing-box/cloudflared tunnel --config %s/tunnel.yml run\n'
 SELECT=2 CREDS='{"TunnelID":null}'
 if change_argo; then echo 'malformed JSON accepted' >&2; exit 1; fi
 [ ! -s "$EVENTS" ]
+# JSON credential rotation preserves unrelated ingress routes and changes only first hostname.
+reset_case
+printf 'ExecStart=/etc/sing-box/cloudflared tunnel --config %s/tunnel.yml run\n' "$WORK_DIR" > "$ARGO_DAEMON_FILE"
+printf '{"AccountTag":"old","TunnelSecret":"old","TunnelID":"old"}\n' > "$WORK_DIR/tunnel.json"
+printf 'tunnel: old\ncredentials-file: /etc/sing-box/tunnel.json\ningress:\n  - hostname: old.example.com\n    service: http://localhost:8080\n  - hostname: another.example.com\n    service: http://localhost:9999\n' > "$WORK_DIR/tunnel.yml"
+SELECT=2 CREDS='{"AccountTag":"new","TunnelSecret":"new","TunnelID":"new"}' DOMAIN=new.example.com
+change_argo
+grep -qx 'tunnel: new' "$WORK_DIR/tunnel.yml"
+grep -q 'hostname: new.example.com' "$WORK_DIR/tunnel.yml"
+grep -q 'hostname: another.example.com' "$WORK_DIR/tunnel.yml"
+grep -q 'localhost:9999' "$WORK_DIR/tunnel.yml"
+grep -q '"TunnelID":"new"' "$WORK_DIR/tunnel.json"
+grep -qx export "$EVENTS"
 echo 'PASS: Argo type detection, Try rebuild, fixed reconnection, unknown mode, invalid credentials'
