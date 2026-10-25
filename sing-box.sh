@@ -3097,41 +3097,115 @@ check_system_ip() {
   [ "$L" = 'C' ] && local IS_CHINESE='?lang=zh-CN'
   local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
   local DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
-  if [ -n ""${DEFAULT_LOCAL_INTERFACE4}${DEFAULT_LOCAL_INTERFACE6}"" ]; then
-    local DEFAULT_LOCAL_IP4=$(ip -4 addr show $DEFAULT_LOCAL_INTERFACE4 | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
-    local DEFAULT_LOCAL_IP6=$(ip -6 addr show $DEFAULT_LOCAL_INTERFACE6 | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
+  if [ -n "${DEFAULT_LOCAL_INTERFACE4}${DEFAULT_LOCAL_INTERFACE6}" ]; then
+    local DEFAULT_LOCAL_IP4=$(ip -4 addr show "$DEFAULT_LOCAL_INTERFACE4" | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
+    local DEFAULT_LOCAL_IP6=$(ip -6 addr show "$DEFAULT_LOCAL_INTERFACE6" | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
     [ -n "$DEFAULT_LOCAL_IP4" ] && local BIND_ADDRESS4="--bind-address=$DEFAULT_LOCAL_IP4"
     [ -n "$DEFAULT_LOCAL_IP6" ] && local BIND_ADDRESS6="--bind-address=$DEFAULT_LOCAL_IP6"
   fi
 
-  # 并行检测 IPv4 和 IPv6 信息
+  # Compare two GeoIP providers for each address family independently.
+  # ip.cloudflare.now.cc remains the primary source when both providers agree.
+  # If countries differ, prefer ipdata.free; if one source fails, use the valid source.
+  local IP4_PRIMARY IP4_IPDATA IP6_PRIMARY IP6_IPDATA
   {
-    local CHECK_IP4=$(wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 https://ip.cloudflare.now.cc${IS_CHINESE})
-    printf '%s\n' "$CHECK_IP4" > "$TEMP_DIR/ip4.json"
-  }&
-
+    IP4_PRIMARY=$(wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=1 --timeout=3 "https://ip.cloudflare.now.cc${IS_CHINESE}" 2>/dev/null || true)
+    printf '%s\n' "$IP4_PRIMARY" > "$TEMP_DIR/ip4-primary.json"
+    IP4_IPDATA=$(wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=1 --timeout=3 https://ipdata.free/ 2>/dev/null || true)
+    printf '%s\n' "$IP4_IPDATA" > "$TEMP_DIR/ip4-ipdata.json"
+  } &
+  local PID4=$!
   {
-    local CHECK_IP6=$(wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=2 --timeout=2 https://ip.cloudflare.now.cc${IS_CHINESE})
-    printf '%s\n' "$CHECK_IP6" > "$TEMP_DIR/ip6.json"
-  }&
+    IP6_PRIMARY=$(wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=1 --timeout=3 "https://ip.cloudflare.now.cc${IS_CHINESE}" 2>/dev/null || true)
+    printf '%s\n' "$IP6_PRIMARY" > "$TEMP_DIR/ip6-primary.json"
+    IP6_IPDATA=$(wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=1 --timeout=3 https://ipdata.free/ 2>/dev/null || true)
+    printf '%s\n' "$IP6_IPDATA" > "$TEMP_DIR/ip6-ipdata.json"
+  } &
+  local PID6=$!
+  wait "$PID4" "$PID6" 2>/dev/null || true
 
-  wait
+  # Resolve each family. Prefer ipdata's country and flag only when the
+  # primary and secondary providers disagree; a valid sole response is fallback.
+  local PRIMARY_IP PRIMARY_COUNTRY PRIMARY_FLAG PRIMARY_ISP
+  local SECONDARY_IP SECONDARY_COUNTRY SECONDARY_FLAG SECONDARY_ISP SECONDARY_CODE
+  local IP4_JSON IP6_JSON
+  IP4_PRIMARY=$(cat "$TEMP_DIR/ip4-primary.json" 2>/dev/null || true)
+  IP4_IPDATA=$(cat "$TEMP_DIR/ip4-ipdata.json" 2>/dev/null || true)
+  IP6_PRIMARY=$(cat "$TEMP_DIR/ip6-primary.json" 2>/dev/null || true)
+  IP6_IPDATA=$(cat "$TEMP_DIR/ip6-ipdata.json" 2>/dev/null || true)
+  rm -f "$TEMP_DIR"/ip{4,6}-{primary,ipdata}.json
 
-  [ -s $TEMP_DIR/ip4.json ] &&
-  local IP4_JSON=$(cat $TEMP_DIR/ip4.json) &&
-  WAN4=$(system_ip_field ip <<< "$IP4_JSON") &&
-  COUNTRY4=$(system_ip_field country <<< "$IP4_JSON") &&
-  EMOJI4=$(system_ip_field emoji <<< "$IP4_JSON") &&
-  ASNORG4=$(system_ip_field isp <<< "$IP4_JSON") &&
-  rm -f $TEMP_DIR/ip4.json
+  if [ -n "$IP4_PRIMARY" ] || [ -n "$IP4_IPDATA" ]; then
+    PRIMARY_IP=$(system_ip_field ip <<< "$IP4_PRIMARY")
+    PRIMARY_COUNTRY=$(system_ip_field country <<< "$IP4_PRIMARY")
+    PRIMARY_FLAG=$(system_ip_field emoji <<< "$IP4_PRIMARY")
+    PRIMARY_ISP=$(system_ip_field isp <<< "$IP4_PRIMARY")
+    SECONDARY_IP=$(system_ip_field ip <<< "$IP4_IPDATA")
+    SECONDARY_COUNTRY=$(system_ip_field country_code <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country_name <<< "$IP4_IPDATA")
+    SECONDARY_FLAG=$(system_ip_field emoji <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP4_IPDATA")
+    SECONDARY_ISP=$(system_ip_field organisation <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field isp <<< "$IP4_IPDATA")
+    # ipdata country_code is the most stable comparison field; normalize the
+    # primary provider's country name/code for a country-level comparison.
+    local PRIMARY_CODE4
+    PRIMARY_CODE4=$(system_ip_field country_code <<< "$IP4_PRIMARY")
+    if [ -n "$PRIMARY_CODE4" ] && [ -n "$SECONDARY_COUNTRY" ]; then
+      [[ "${PRIMARY_CODE4^^}" == "${SECONDARY_COUNTRY^^}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
+    elif [ -n "$PRIMARY_COUNTRY" ] && [ -n "$SECONDARY_COUNTRY" ]; then
+      [[ "${PRIMARY_COUNTRY,,}" == "${SECONDARY_COUNTRY,,}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
+    fi
+    if [ -n "$IP4_IPDATA" ] && { [ -z "$IP4_PRIMARY" ] || [ "$PRIMARY_COUNTRY" = __COUNTRY_MISMATCH__ ] || [ -z "$PRIMARY_FLAG" ]; }; then
+      WAN4=${SECONDARY_IP:-$PRIMARY_IP}
+      COUNTRY4=$SECONDARY_COUNTRY
+      EMOJI4=$SECONDARY_FLAG
+      ASNORG4=$SECONDARY_ISP
+    else
+      WAN4=$PRIMARY_IP
+      COUNTRY4=$PRIMARY_COUNTRY
+      EMOJI4=$PRIMARY_FLAG
+      ASNORG4=$PRIMARY_ISP
+    fi
+    # Accept a valid response from ipdata even when the primary response has
+    # a different IP field, but never cache a response without a valid IP/flag.
+    [ -n "$WAN4" ] && ! is_valid_server_addr "$WAN4" && unset WAN4
+    node_country_flag_valid "${EMOJI4:-}" || { unset EMOJI4 COUNTRY4 ASNORG4; }
+  fi
 
-  [ -s $TEMP_DIR/ip6.json ] &&
-  local IP6_JSON=$(cat $TEMP_DIR/ip6.json) &&
-  WAN6=$(system_ip_field ip <<< "$IP6_JSON") &&
-  COUNTRY6=$(system_ip_field country <<< "$IP6_JSON") &&
-  EMOJI6=$(system_ip_field emoji <<< "$IP6_JSON") &&
-  ASNORG6=$(system_ip_field isp <<< "$IP6_JSON") &&
-  rm -f $TEMP_DIR/ip6.json
+  if [ -n "$IP6_PRIMARY" ] || [ -n "$IP6_IPDATA" ]; then
+    PRIMARY_IP=$(system_ip_field ip <<< "$IP6_PRIMARY")
+    PRIMARY_COUNTRY=$(system_ip_field country <<< "$IP6_PRIMARY")
+    PRIMARY_FLAG=$(system_ip_field emoji <<< "$IP6_PRIMARY")
+    PRIMARY_ISP=$(system_ip_field isp <<< "$IP6_PRIMARY")
+    SECONDARY_IP=$(system_ip_field ip <<< "$IP6_IPDATA")
+    SECONDARY_COUNTRY=$(system_ip_field country_code <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country_name <<< "$IP6_IPDATA")
+    SECONDARY_FLAG=$(system_ip_field emoji <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP6_IPDATA")
+    SECONDARY_ISP=$(system_ip_field organisation <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field isp <<< "$IP6_IPDATA")
+    local PRIMARY_CODE6
+    PRIMARY_CODE6=$(system_ip_field country_code <<< "$IP6_PRIMARY")
+    if [ -n "$PRIMARY_CODE6" ] && [ -n "$SECONDARY_COUNTRY" ]; then
+      [[ "${PRIMARY_CODE6^^}" == "${SECONDARY_COUNTRY^^}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
+    elif [ -n "$PRIMARY_COUNTRY" ] && [ -n "$SECONDARY_COUNTRY" ]; then
+      [[ "${PRIMARY_COUNTRY,,}" == "${SECONDARY_COUNTRY,,}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
+    fi
+    if [ -n "$IP6_IPDATA" ] && { [ -z "$IP6_PRIMARY" ] || [ "$PRIMARY_COUNTRY" = __COUNTRY_MISMATCH__ ] || [ -z "$PRIMARY_FLAG" ]; }; then
+      WAN6=${SECONDARY_IP:-$PRIMARY_IP}
+      COUNTRY6=$SECONDARY_COUNTRY
+      EMOJI6=$SECONDARY_FLAG
+      ASNORG6=$SECONDARY_ISP
+    else
+      WAN6=$PRIMARY_IP
+      COUNTRY6=$PRIMARY_COUNTRY
+      EMOJI6=$PRIMARY_FLAG
+      ASNORG6=$PRIMARY_ISP
+    fi
+    [ -n "$WAN6" ] && ! is_valid_server_addr "$WAN6" && unset WAN6
+    node_country_flag_valid "${EMOJI6:-}" || { unset EMOJI6 COUNTRY6 ASNORG6; }
+  fi
   return 0
 }
 
