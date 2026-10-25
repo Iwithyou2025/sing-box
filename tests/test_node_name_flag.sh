@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 s=Path('sing-box.sh').read_text()
 for name in ['input_node_name','node_country_flag_valid','node_country_flag_from_name',
-             'node_country_flag_load','node_name_with_flag','node_names_apply_country',
+             'system_country_flag_from_code','node_country_flag_load','node_name_with_flag','node_names_apply_country',
              'node_name_replace_files','change_config','check_system_ip','system_ip_field',
              'is_valid_server_addr','sing-box_json','fetch_nodes_value','export_list','export_list_impl',
              'subscription_template_valid','subscription_prepare_templates','subscription_lock_acquire',
