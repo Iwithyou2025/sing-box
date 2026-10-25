@@ -71,5 +71,10 @@ for name in proxies clash clash2 sing-box v2rayn throne shadowrocket; do
 done
 grep -qx 'new list' "$WORK_DIR/list"
 subscription_lock_acquire
+if flock -n "$WORK_DIR/.subscription-export.lock" -c ':'; then
+  echo 'concurrent subscription writer acquired a held lock' >&2
+  exit 1
+fi
 subscription_lock_release
+flock -n "$WORK_DIR/.subscription-export.lock" -c ':'
 echo 'PASS: cached templates, missing/invalid templates, zero-byte prevention, JSON validation, rollback and publish'
