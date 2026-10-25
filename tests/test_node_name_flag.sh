@@ -9,6 +9,9 @@ source <(sed -n \
   -e '/^node_name_keep_flag() {/,/^}/p' \
   -e '/^node_name_replace_files() {/,/^}/p' sing-box.sh)
 
+# This test isolates node-label logic; Argo domain refresh is unrelated to its assertions.
+argo_refresh_domain_for_export() { :; }
+
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR/conf" "$WORK_DIR/subscribe" "$WORK_DIR/cert"
