@@ -2277,117 +2277,28 @@ argo_manual_live_domain() {
   [[ "$PID" =~ ^[0-9]+$ ]] || return 1
   ADDR=$(ss -nltp 2>/dev/null | awk -v pid="$PID" 'index($0, "pid=" pid ",") {print $4;exit}')
   [ -n "$ADDR" ] || return 1
-  # curl supports fractional timeouts, so even the last attempt stays within the 5s budget.
+  # Bound each local metrics request to 1s; there is no overall hostname wait deadline.
   HOST=$(curl --noproxy '*' -fsS --connect-timeout "$LIMIT" --max-time "$LIMIT" "http://$ADDR/quicktunnel" 2>/dev/null | awk -F '"' '{print $4}')
   [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   printf '%s\n' "$HOST"
 }
 
-# Monotonic-enough wall-clock microseconds for an overall manual readiness deadline.
-# Bash 5 provides EPOCHREALTIME; earlier Bash versions fall back to SECONDS.
-argo_manual_clock_us() {
-  local CURRENT="${EPOCHREALTIME:-}"
-  if [[ "$CURRENT" =~ ^[0-9]+[.][0-9]{6}$ ]]; then
-    printf '%s\n' "${CURRENT/./}"
-  else
-    printf '%s\n' "$(( SECONDS * 1000000 ))"
-  fi
-}
-
-# Poll for at most 5s, with no initial sleep; return immediately once the hostname is valid.
-# This is independent of argo_monitor_wait_domain and never restarts the tunnel.
+# A new hostname from the RUNNING cloudflared local API is sufficient for
+# manual Try tunnel rebuilding. There is deliberately NO overall timeout and
+# NO public DNS/HTTPS health check. The user may interrupt the wait with Ctrl+C.
+# Only continue once the hostname differs from the previous published hostname.
 argo_manual_wait_domain() {
-  local START DEADLINE NOW REMAIN LIMIT PAUSE HOST
-  START=$(argo_manual_clock_us)
-  DEADLINE=$((START + 5000000))
+  local PREVIOUS="${1:-}" HOST=''
   while :; do
-    NOW=$(argo_manual_clock_us)
-    REMAIN=$((DEADLINE - NOW))
-    [ "$REMAIN" -gt 0 ] || return 1
-    if [ "$REMAIN" -ge 1000000 ]; then
-      LIMIT=1
-    else
-      printf -v LIMIT '0.%06d' "$REMAIN"
-    fi
-    HOST=$(argo_manual_live_domain "$LIMIT") && {
+    # The tunnel has stopped: abort rather than waiting on an inactive service.
+    cmd_systemctl status argo >/dev/null 2>&1 || return 1
+    HOST=$(argo_manual_live_domain 1) || HOST=''
+    if [[ "$HOST" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] && [ "$HOST" != "$PREVIOUS" ]; then
       printf '%s\n' "$HOST"
       return 0
-    }
-    NOW=$(argo_manual_clock_us)
-    REMAIN=$((DEADLINE - NOW))
-    [ "$REMAIN" -gt 0 ] || return 1
-    if [ "$REMAIN" -gt 200000 ]; then
-      sleep 0.2
-    else
-      printf -v PAUSE '0.%06d' "$REMAIN"
-      sleep "$PAUSE"
     fi
+    sleep 0.2
   done
-}
-
-# After the new Quick Tunnel hostname appears, allow up to 10 seconds for DNS/HTTPS
-# readiness. Transient failures with NO HTTP response (curl HTTP 000) are retried.
-# Any real HTTP status other than exactly 200 aborts immediately, including 530.
-# Keep this manual path separate from the argo-monitor's polling/rebuild logic.
-argo_manual_domain_healthy() {
-  local DOMAIN="$1" START DEADLINE NOW REMAIN LIMIT PAUSE CODE RC LAST_RC=0
-  local -a IP_FAMILY=()
-  command -v curl >/dev/null 2>&1 || { warning " curl is missing "; return 1; }
-  # Match the successful VPS diagnostic: bypass inherited proxies and prefer IPv4
-  # where the host has an IPv4 route; retain IPv6-only compatibility.
-  if command -v ip >/dev/null 2>&1; then
-    if ip -4 route get 1.1.1.1 >/dev/null 2>&1; then
-      IP_FAMILY=(-4)
-    elif ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then
-      IP_FAMILY=(-6)
-    fi
-  fi
-  START=$(argo_manual_clock_us)
-  DEADLINE=$((START + 10000000))
-  while :; do
-    NOW=$(argo_manual_clock_us)
-    REMAIN=$((DEADLINE - NOW))
-    [ "$REMAIN" -gt 0 ] || break
-    # Let one HTTP/TLS attempt take up to 3s (like the working manual curl),
-    # while preserving the original 5-second overall readiness deadline.
-    if [ "$REMAIN" -ge 3000000 ]; then
-      LIMIT=3
-    elif [ "$REMAIN" -ge 1000000 ]; then
-      printf -v LIMIT '%d.%06d' "$((REMAIN / 1000000))" "$((REMAIN % 1000000))"
-    else
-      printf -v LIMIT '0.%06d' "$REMAIN"
-    fi
-    # Do not follow redirects: a 3xx response is a non-200 terminal result.
-    # -s suppresses repeated transient DNS errors; final failure is reported below.
-    RC=0
-    CODE=$(curl --noproxy '*' "${IP_FAMILY[@]}" -sS --connect-timeout "$LIMIT" --max-time "$LIMIT" \
-      -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || RC=$?
-    LAST_RC=$RC
-    if [ "$CODE" = 200 ]; then
-      if [ "$RC" -eq 0 ]; then
-        info " HTTPS 200 "
-        return 0
-      fi
-      warning " HTTPS returned HTTP 200 but transfer failed (curl exit $RC); subscriptions unchanged. "
-      return 1
-    fi
-    if [[ "$CODE" =~ ^[1-9][0-9][0-9]$ ]]; then
-      warning " HTTPS $CODE for $DOMAIN; canceling tunnel publication and preserving subscriptions. "
-      return 1
-    fi
-    # HTTP 000 / no HTTP response: retry quickly until the overall 10s budget.
-    NOW=$(argo_manual_clock_us)
-    REMAIN=$((DEADLINE - NOW))
-    [ "$REMAIN" -gt 0 ] || break
-    if [ "$REMAIN" -gt 200000 ]; then
-      sleep 0.2
-    else
-      printf -v PAUSE '0.%06d' "$REMAIN"
-      sleep "$PAUSE"
-    fi
-  done
-  warning " Quick Tunnel HTTPS received no HTTP response within 10 seconds (last curl exit $LAST_RC); subscriptions unchanged. "
-  return 1
 }
 
 # Only reuse subscription publication; do not invoke the monitor's wait/health/rebuild path.
@@ -2483,26 +2394,14 @@ argo_change_run() (
   if [ "$TYPE" = Try ]; then
     info " Restarting Argo... "
     cmd_systemctl restart argo && cmd_systemctl status argo >/dev/null 2>&1 || return 1
-    LIVE=$(argo_manual_wait_domain) || {
-      warning " Quick Tunnel hostname not ready within 5 seconds; subscriptions unchanged. "
+    LIVE=$(argo_manual_wait_domain "$OLD_DOMAIN") || {
+      warning " Argo stopped while waiting for a new Quick Tunnel hostname; subscriptions unchanged. "
       return 1
     }
     info " New Argo domain: $LIVE "
-    argo_manual_domain_healthy "$LIVE" || {
-      warning " Quick Tunnel HTTPS verification failed for $LIVE; no subscription/configuration update performed. "
-      return 1
-    }
-    # A successful GET applies only to the exact currently running Quick Tunnel.
-    # A concurrent cloudflared restart must not publish an already-stale hostname.
-    local CONFIRMED_LIVE
-    CONFIRMED_LIVE=$(argo_manual_live_domain 1) || {
-      warning " Cannot confirm the active Quick Tunnel after HTTPS verification; subscriptions unchanged. "
-      return 1
-    }
-    if [ "$CONFIRMED_LIVE" != "$LIVE" ]; then
-      warning " Quick Tunnel hostname changed during verification ($LIVE -> $CONFIRMED_LIVE); subscriptions unchanged. "
-      return 1
-    fi
+    # Per manual Try policy: the new hostname itself confirms tunnel replacement.
+    # No DNS lookup, HTTP status or fixed elapsed-time validation is performed.
+    info " Argo tunnel updated; syncing subscriptions (without DNS/HTTPS checks). "
     ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
     info " Argo changed and subscriptions updated. "
     return 0
