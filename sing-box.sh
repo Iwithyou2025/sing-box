@@ -779,6 +779,17 @@ node_country_flag_from_name() {
   return 1
 }
 
+# Convert an ISO-3166-1 alpha-2 country code to a flag emoji (UTF-8, locale-independent).
+system_country_flag_from_code() {
+  local LC_ALL=C CODE="${1^^}" FIRST SECOND HEX1 HEX2
+  [[ "$CODE" =~ ^[A-Z]{2}$ ]] || return 1
+  FIRST=$(printf '%d' "'${CODE:0:1}")
+  SECOND=$(printf '%d' "'${CODE:1:1}")
+  printf -v HEX1 '%02x' "$((0xa6 + FIRST - 65))"
+  printf -v HEX2 '%02x' "$((0xa6 + SECOND - 65))"
+  printf '%b' "\\xf0\\x9f\\x87\\x${HEX1}\\xf0\\x9f\\x87\\x${HEX2}"
+}
+
 # 国旗是 VPS 级属性，只接受系统 IP 检测结果及其缓存。
 # 旧 node-country-flag 曾由手填名称写入，不能作为 IP 归属地的可信来源。
 node_country_flag_load() {
@@ -3142,21 +3153,15 @@ check_system_ip() {
     PRIMARY_ISP=$(system_ip_field isp <<< "$IP4_PRIMARY")
     SECONDARY_IP=$(system_ip_field ip <<< "$IP4_IPDATA")
     SECONDARY_COUNTRY=$(system_ip_field country_code <<< "$IP4_IPDATA")
-    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country_name <<< "$IP4_IPDATA")
-    SECONDARY_FLAG=$(system_ip_field emoji <<< "$IP4_IPDATA")
-    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP4_IPDATA")
-    SECONDARY_ISP=$(system_ip_field organisation <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country <<< "$IP4_IPDATA")
+    SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_country_flag_from_code "$SECONDARY_COUNTRY" 2>/dev/null || true)
+    SECONDARY_ISP=$(system_ip_field org <<< "$IP4_IPDATA")
+    [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field organisation <<< "$IP4_IPDATA")
     [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field isp <<< "$IP4_IPDATA")
-    # ipdata country_code is the most stable comparison field; normalize the
-    # primary provider's country name/code for a country-level comparison.
-    local PRIMARY_CODE4
-    PRIMARY_CODE4=$(system_ip_field country_code <<< "$IP4_PRIMARY")
-    if [ -n "$PRIMARY_CODE4" ] && [ -n "$SECONDARY_COUNTRY" ]; then
-      [[ "${PRIMARY_CODE4^^}" == "${SECONDARY_COUNTRY^^}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
-    elif [ -n "$PRIMARY_COUNTRY" ] && [ -n "$SECONDARY_COUNTRY" ]; then
-      [[ "${PRIMARY_COUNTRY,,}" == "${SECONDARY_COUNTRY,,}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
-    fi
-    if [ -n "$IP4_IPDATA" ] && { [ -z "$IP4_PRIMARY" ] || [ "$PRIMARY_COUNTRY" = __COUNTRY_MISMATCH__ ] || [ -z "$PRIMARY_FLAG" ]; }; then
+    local COUNTRY_MISMATCH4=0
+    [ -n "$PRIMARY_FLAG" ] && [ -n "$SECONDARY_FLAG" ] && [ "$PRIMARY_FLAG" != "$SECONDARY_FLAG" ] && COUNTRY_MISMATCH4=1
+    if [ -n "$IP4_IPDATA" ] && { [ -z "$IP4_PRIMARY" ] || [ "$COUNTRY_MISMATCH4" = 1 ] || ! node_country_flag_valid "$PRIMARY_FLAG"; }; then
       WAN4=${SECONDARY_IP:-$PRIMARY_IP}
       COUNTRY4=$SECONDARY_COUNTRY
       EMOJI4=$SECONDARY_FLAG
@@ -3180,19 +3185,15 @@ check_system_ip() {
     PRIMARY_ISP=$(system_ip_field isp <<< "$IP6_PRIMARY")
     SECONDARY_IP=$(system_ip_field ip <<< "$IP6_IPDATA")
     SECONDARY_COUNTRY=$(system_ip_field country_code <<< "$IP6_IPDATA")
-    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country_name <<< "$IP6_IPDATA")
-    SECONDARY_FLAG=$(system_ip_field emoji <<< "$IP6_IPDATA")
-    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP6_IPDATA")
-    SECONDARY_ISP=$(system_ip_field organisation <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_COUNTRY" ] || SECONDARY_COUNTRY=$(system_ip_field country <<< "$IP6_IPDATA")
+    SECONDARY_FLAG=$(system_ip_field emoji_flag <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_FLAG" ] || SECONDARY_FLAG=$(system_country_flag_from_code "$SECONDARY_COUNTRY" 2>/dev/null || true)
+    SECONDARY_ISP=$(system_ip_field org <<< "$IP6_IPDATA")
+    [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field organisation <<< "$IP6_IPDATA")
     [ -n "$SECONDARY_ISP" ] || SECONDARY_ISP=$(system_ip_field isp <<< "$IP6_IPDATA")
-    local PRIMARY_CODE6
-    PRIMARY_CODE6=$(system_ip_field country_code <<< "$IP6_PRIMARY")
-    if [ -n "$PRIMARY_CODE6" ] && [ -n "$SECONDARY_COUNTRY" ]; then
-      [[ "${PRIMARY_CODE6^^}" == "${SECONDARY_COUNTRY^^}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
-    elif [ -n "$PRIMARY_COUNTRY" ] && [ -n "$SECONDARY_COUNTRY" ]; then
-      [[ "${PRIMARY_COUNTRY,,}" == "${SECONDARY_COUNTRY,,}" ]] || PRIMARY_COUNTRY=__COUNTRY_MISMATCH__
-    fi
-    if [ -n "$IP6_IPDATA" ] && { [ -z "$IP6_PRIMARY" ] || [ "$PRIMARY_COUNTRY" = __COUNTRY_MISMATCH__ ] || [ -z "$PRIMARY_FLAG" ]; }; then
+    local COUNTRY_MISMATCH6=0
+    [ -n "$PRIMARY_FLAG" ] && [ -n "$SECONDARY_FLAG" ] && [ "$PRIMARY_FLAG" != "$SECONDARY_FLAG" ] && COUNTRY_MISMATCH6=1
+    if [ -n "$IP6_IPDATA" ] && { [ -z "$IP6_PRIMARY" ] || [ "$COUNTRY_MISMATCH6" = 1 ] || ! node_country_flag_valid "$PRIMARY_FLAG"; }; then
       WAN6=${SECONDARY_IP:-$PRIMARY_IP}
       COUNTRY6=$SECONDARY_COUNTRY
       EMOJI6=$SECONDARY_FLAG
