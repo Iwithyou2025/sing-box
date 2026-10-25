@@ -5593,31 +5593,49 @@ argo_monitor_remove() {
 }
 
 argo_monitor_sync() {
-  local FILE
+  local FILE UNIT_CHANGED=0
   [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
   if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
-    [ -x /usr/bin/sb ] || return 0
-    # 已有服务文件也要核实运行状态，不能直接跳过。
+    # Use the project-owned wrapper explicitly; /usr/bin/sb may belong to an unrelated package.
+    [ -x "${WORK_DIR}/sb.sh" ] || return 0
     if [ -s "$FILE" ]; then
       if [ "$SYSTEM" = 'Alpine' ]; then
-        rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+        if grep -q '^command="/usr/bin/sb"$' "$FILE"; then
+          sed -i "s|^command=\"/usr/bin/sb\"$|command=\"${WORK_DIR}/sb.sh\"|" "$FILE" || return 1
+          UNIT_CHANGED=1
+        fi
+        if [ "$UNIT_CHANGED" = 1 ]; then
           rc-update add argo-monitor default >/dev/null 2>&1 || return 1
-        rc-service argo-monitor status >/dev/null 2>&1 ||
-          rc-service argo-monitor start >/dev/null 2>&1 || return 1
+          rc-service argo-monitor restart >/dev/null 2>&1 ||
+            rc-service argo-monitor start >/dev/null 2>&1 || return 1
+        else
+          rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+            rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+          rc-service argo-monitor status >/dev/null 2>&1 ||
+            rc-service argo-monitor start >/dev/null 2>&1 || return 1
+        fi
       else
-        if ! systemctl is-enabled --quiet argo-monitor.service ||
-           ! systemctl is-active --quiet argo-monitor.service; then
+        if grep -q '^ExecStart=/usr/bin/sb -H$' "$FILE"; then
+          sed -i "s|^ExecStart=/usr/bin/sb -H$|ExecStart=${WORK_DIR}/sb.sh -H|" "$FILE" || return 1
+          systemctl daemon-reload || return 1
+          UNIT_CHANGED=1
+        fi
+        if [ "$UNIT_CHANGED" = 1 ]; then
+          systemctl enable argo-monitor.service >/dev/null 2>&1 || return 1
+          systemctl restart argo-monitor.service >/dev/null 2>&1 || return 1
+        elif ! systemctl is-enabled --quiet argo-monitor.service ||
+             ! systemctl is-active --quiet argo-monitor.service; then
           systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
         fi
       fi
       return 0
     fi
     if [ "$SYSTEM" = 'Alpine' ]; then
-      cat > "$FILE" <<'EOF'
+      cat > "$FILE" <<EOF
 #!/sbin/openrc-run
 name="argo-monitor"
 description="Argo Quick Tunnel health monitor"
-command="/usr/bin/sb"
+command="${WORK_DIR}/sb.sh"
 command_args="-H"
 command_background="yes"
 pidfile="/run/argo-monitor.pid"
@@ -5629,24 +5647,24 @@ depend() {
 }
 EOF
       chmod +x "$FILE"
-      rc-update add argo-monitor default >/dev/null 2>&1
-      rc-service argo-monitor start >/dev/null 2>&1
+      rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+      rc-service argo-monitor start >/dev/null 2>&1 || return 1
     else
-      cat > "$FILE" <<'EOF'
+      cat > "$FILE" <<EOF
 [Unit]
 Description=Cloudflare Quick Tunnel health monitor
 Wants=network-online.target
 After=network-online.target argo.service
 [Service]
 Type=simple
-ExecStart=/usr/bin/sb -H
+ExecStart=${WORK_DIR}/sb.sh -H
 Restart=always
 RestartSec=30s
 [Install]
 WantedBy=multi-user.target
 EOF
-      systemctl daemon-reload
-      systemctl enable --now argo-monitor.service >/dev/null 2>&1
+      systemctl daemon-reload || return 1
+      systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
     fi
   else
     argo_monitor_remove
