@@ -78,6 +78,14 @@ reset_case
 argo_monitor_sync
 count_commands 0
 
+# Reinstalling the updated launcher intentionally restarts only the monitor.
+reset_case
+: > "$WORK_DIR/enabled"
+: > "$WORK_DIR/active"
+SB_MONITOR_FORCE_REFRESH=1 argo_monitor_sync
+count_commands 2
+grep -qx 'enable' "$WORK_DIR/commands" || grep -qx 'restart' "$WORK_DIR/commands"
+
 # Existing file, service stopped: start and preserve enabled state.
 reset_case
 : > "$WORK_DIR/enabled"
