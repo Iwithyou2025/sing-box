@@ -6,20 +6,29 @@ WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 ARGO_DAEMON_FILE="$WORK_DIR/argo.service"
 printf 'ExecStart=/tmp/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
-: > "$WORK_DIR/sb"
-chmod +x "$WORK_DIR/sb"
+: > "$WORK_DIR/sb.sh"
+chmod +x "$WORK_DIR/sb.sh"
 
 # Load the actual current function with only hardcoded filesystem paths sandboxed.
 sed -n '/^argo_monitor_sync() {/,/^argo_monitor_live_domain() {/p' sing-box.sh | sed '$d' |
   sed -e "s|/etc/systemd/system/argo-monitor.service|$WORK_DIR/argo-monitor.service|g" \
-      -e "s|/etc/init.d/argo-monitor|$WORK_DIR/argo-monitor.init|g" \
-      -e "s|/usr/bin/sb|$WORK_DIR/sb|g" > "$WORK_DIR/func.sh"
+      -e "s|/etc/init.d/argo-monitor|$WORK_DIR/argo-monitor.init|g" > "$WORK_DIR/func.sh"
 source "$WORK_DIR/func.sh"
 
 systemctl() {
   case "$*" in
     'is-enabled --quiet argo-monitor.service') test -e "$WORK_DIR/enabled" ;;
     'is-active --quiet argo-monitor.service') test -e "$WORK_DIR/active" ;;
+    'daemon-reload') printf 'daemon-reload\n' >> "$WORK_DIR/commands" ;;
+    'enable argo-monitor.service')
+      printf 'enable\n' >> "$WORK_DIR/commands"
+      : > "$WORK_DIR/enabled"
+      ;;
+    'restart argo-monitor.service')
+      printf 'restart\n' >> "$WORK_DIR/commands"
+      test ! -e "$WORK_DIR/force_fail" || return 1
+      : > "$WORK_DIR/active"
+      ;;
     'enable --now argo-monitor.service')
       printf 'enable-now\n' >> "$WORK_DIR/commands"
       test ! -e "$WORK_DIR/force_fail" || return 1
@@ -40,6 +49,7 @@ rc-service() {
   case "$*" in
     'argo-monitor status') test -e "$WORK_DIR/active" ;;
     'argo-monitor start') printf 'rc-start\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/active" ;;
+    'argo-monitor restart') printf 'rc-restart\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/active" ;;
     *) printf 'Unexpected rc-service: %s\n' "$*" >&2; return 99 ;;
   esac
 }
@@ -96,8 +106,34 @@ if argo_monitor_sync; then
   exit 1
 fi
 
-# Alpine/OpenRC: existing init script must be enabled and started.
+# Existing systemd unit with the old conflicting executable is migrated and restarted.
+SYSTEM=Ubuntu
+printf '[Unit]\nExecStart=/usr/bin/sb -H\n' > "$WORK_DIR/argo-monitor.service"
+reset_case
+: > "$WORK_DIR/enabled"
+: > "$WORK_DIR/active"
+argo_monitor_sync
+count_commands 3
+grep -qx "ExecStart=$WORK_DIR/sb.sh -H" "$WORK_DIR/argo-monitor.service"
+
+# Fresh systemd unit points directly at the project-owned wrapper.
+rm -f "$WORK_DIR/argo-monitor.service"
+reset_case
+argo_monitor_sync
+count_commands 2
+grep -qx "ExecStart=$WORK_DIR/sb.sh -H" "$WORK_DIR/argo-monitor.service"
+
+# Alpine/OpenRC: migrate the same old command path.
 SYSTEM=Alpine
+printf '#!/sbin/openrc-run\ncommand="/usr/bin/sb"\n' > "$WORK_DIR/argo-monitor.init"
+reset_case
+: > "$WORK_DIR/enabled"
+: > "$WORK_DIR/active"
+argo_monitor_sync
+count_commands 2
+grep -qx "command=\"$WORK_DIR/sb.sh\"" "$WORK_DIR/argo-monitor.init"
+
+# Alpine/OpenRC: existing init script must be enabled and started.
 printf '#!/sbin/openrc-run\n' > "$WORK_DIR/argo-monitor.init"
 reset_case
 argo_monitor_sync

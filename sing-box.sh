@@ -439,6 +439,14 @@ E[196]="Multiplexing updated and reloaded."
 C[196]="多路复用配置已更新并已热加载。"
 E[197]="Multiplexing update failed; original configurations restored."
 C[197]="多路复用更新失败，已恢复原配置。"
+E[202]="Sync Argo to the latest version"
+C[202]="同步 Argo 至最新版本"
+E[203]="Argo download or validation failed; current version preserved."
+C[203]="Argo 下载或校验失败，保留当前版本。"
+E[204]="Argo failed to start; restored the previous binary."
+C[204]="Argo 启动失败，已恢复旧版核心。"
+E[205]="Argo restarted, but temporary domain/subscription refresh failed; please retry sb -n."
+C[205]="Argo 已重启，但临时域名或订阅同步失败，请重试 sb -n。"
 
 # 自定义字体彩色，read 函数
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }  # 红色
@@ -2508,7 +2516,7 @@ check_install() {
   # 如果有需要，后台静默下载 cloudflared（卸载模式跳过）
   if [[ "${STATUS[1]}" = "$(text 26)" || "$NONINTERACTIVE_INSTALL" = 'noninteractive_install' ]] && [ ! -s ${WORK_DIR}/cloudflared ] && [ "$IS_UNINSTALL" != 'is_uninstall' ]; then
     {
-      wget --no-check-certificate --tries=2 --timeout=10 -qO $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/cloudflared >/dev/null 2>&1
+      download_cloudflared "$TEMP_DIR/cloudflared" >/dev/null 2>&1
     }&
   elif [ "${STATUS[1]}" != "$(text 26)" ]; then
     # 查 Argo 进程号，运行时长和内存占用
@@ -5522,7 +5530,9 @@ fetch_nodes_value() {
   [[ -z "$NODE_NAME_CONFIRM" && -s ${WORK_DIR}/subscribe/clash ]] && NODE_NAME_CONFIRM=$(awk -F "'" '/u: &u/{print $2; exit}' ${WORK_DIR}/subscribe/clash)
 
   # 如有 Argo，获取 Argo Tunnel
+  if [ "${ARGO_UPDATE_PRESERVE_SERVICE_STATE:-0}" != 1 ]; then
   [[ ${STATUS[1]} =~ $(text 27)|$(text 28) ]] && grep -q '\--url' ${ARGO_DAEMON_FILE} && { cmd_systemctl enable argo; sleep 2 && cmd_systemctl status argo &>/dev/null && fetch_quicktunnel_domain; }
+  fi
 
   # 获取 UUID_CONFIRM（从 JSON 配置文件读取，不依赖 nginx）
   # 如 UUID_CONFIRM 已有值（例如上层已交互输入），跳过 JSON 读取，避免重复弹窗
@@ -5665,31 +5675,49 @@ argo_monitor_remove() {
 }
 
 argo_monitor_sync() {
-  local FILE
+  local FILE UNIT_CHANGED=0
   [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
   if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
-    [ -x /usr/bin/sb ] || return 0
-    # 已有服务文件也要核实运行状态，不能直接跳过。
+    # Use the project-owned wrapper explicitly; /usr/bin/sb may belong to an unrelated package.
+    [ -x "${WORK_DIR}/sb.sh" ] || return 0
     if [ -s "$FILE" ]; then
       if [ "$SYSTEM" = 'Alpine' ]; then
-        rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+        if grep -q '^command="/usr/bin/sb"$' "$FILE"; then
+          sed -i "s|^command=\"/usr/bin/sb\"$|command=\"${WORK_DIR}/sb.sh\"|" "$FILE" || return 1
+          UNIT_CHANGED=1
+        fi
+        if [ "$UNIT_CHANGED" = 1 ]; then
           rc-update add argo-monitor default >/dev/null 2>&1 || return 1
-        rc-service argo-monitor status >/dev/null 2>&1 ||
-          rc-service argo-monitor start >/dev/null 2>&1 || return 1
+          rc-service argo-monitor restart >/dev/null 2>&1 ||
+            rc-service argo-monitor start >/dev/null 2>&1 || return 1
+        else
+          rc-update show default 2>/dev/null | grep -qw argo-monitor ||
+            rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+          rc-service argo-monitor status >/dev/null 2>&1 ||
+            rc-service argo-monitor start >/dev/null 2>&1 || return 1
+        fi
       else
-        if ! systemctl is-enabled --quiet argo-monitor.service ||
-           ! systemctl is-active --quiet argo-monitor.service; then
+        if grep -q '^ExecStart=/usr/bin/sb -H$' "$FILE"; then
+          sed -i "s|^ExecStart=/usr/bin/sb -H$|ExecStart=${WORK_DIR}/sb.sh -H|" "$FILE" || return 1
+          systemctl daemon-reload || return 1
+          UNIT_CHANGED=1
+        fi
+        if [ "$UNIT_CHANGED" = 1 ]; then
+          systemctl enable argo-monitor.service >/dev/null 2>&1 || return 1
+          systemctl restart argo-monitor.service >/dev/null 2>&1 || return 1
+        elif ! systemctl is-enabled --quiet argo-monitor.service ||
+             ! systemctl is-active --quiet argo-monitor.service; then
           systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
         fi
       fi
       return 0
     fi
     if [ "$SYSTEM" = 'Alpine' ]; then
-      cat > "$FILE" <<'EOF'
+      cat > "$FILE" <<EOF
 #!/sbin/openrc-run
 name="argo-monitor"
 description="Argo Quick Tunnel health monitor"
-command="/usr/bin/sb"
+command="${WORK_DIR}/sb.sh"
 command_args="-H"
 command_background="yes"
 pidfile="/run/argo-monitor.pid"
@@ -5701,24 +5729,24 @@ depend() {
 }
 EOF
       chmod +x "$FILE"
-      rc-update add argo-monitor default >/dev/null 2>&1
-      rc-service argo-monitor start >/dev/null 2>&1
+      rc-update add argo-monitor default >/dev/null 2>&1 || return 1
+      rc-service argo-monitor start >/dev/null 2>&1 || return 1
     else
-      cat > "$FILE" <<'EOF'
+      cat > "$FILE" <<EOF
 [Unit]
 Description=Cloudflare Quick Tunnel health monitor
 Wants=network-online.target
 After=network-online.target argo.service
 [Service]
 Type=simple
-ExecStart=/usr/bin/sb -H
+ExecStart=${WORK_DIR}/sb.sh -H
 Restart=always
 RestartSec=30s
 [Install]
 WantedBy=multi-user.target
 EOF
-      systemctl daemon-reload
-      systemctl enable --now argo-monitor.service >/dev/null 2>&1
+      systemctl daemon-reload || return 1
+      systemctl enable --now argo-monitor.service >/dev/null 2>&1 || return 1
     fi
   else
     argo_monitor_remove
@@ -7147,6 +7175,101 @@ uninstall() {
 }
 
 
+# 安装和更新共用下载入口；先验证可执行文件，失败不留下半成品。
+download_cloudflared() {
+  local TARGET="$1" PREFIX OUTPUT
+  for PREFIX in "$GH_PROXY" ''; do
+    rm -f "$TARGET"
+    if wget --no-check-certificate --tries=2 --timeout=10 -qO "$TARGET" "${PREFIX}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH" 2>/dev/null &&
+       chmod +x "$TARGET" && OUTPUT=$("$TARGET" --version 2>/dev/null) &&
+       [[ "$OUTPUT" =~ ^cloudflared[[:space:]]version[[:space:]][0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      return 0
+    fi
+    [ -z "$PREFIX" ] && break
+  done
+  rm -f "$TARGET"
+  return 1
+}
+
+# 更新或回退后的 Quick Tunnel 都可能更换域名，共用现有同步逻辑。
+argo_update_refresh_domain() {
+  grep -q -- '--url' "$ARGO_DAEMON_FILE" || return 0
+  (
+    unset ARGO_MONITOR_VERIFIED_DOMAIN
+    ARGO_UPDATE_PRESERVE_SERVICE_STATE=1
+    fetch_quicktunnel_domain && export_list
+  ) || {
+    warning " $(text 205) "
+    return 1
+  }
+}
+
+# 更新已安装的 Argo；未安装时不额外安装。
+argo_version() {
+  local LOCAL ONLINE UPDATE RUNNING=0 CANDIDATE BACKUP
+  if [ ! -x "$WORK_DIR/cloudflared" ] || [ ! -s "$ARGO_DAEMON_FILE" ]; then
+    info " Argo $(text 26) "
+    return 0
+  fi
+  # 仅管理本脚本的服务，避免重启其他安装方式的 cloudflared。
+  grep -Fq "$WORK_DIR/cloudflared" "$ARGO_DAEMON_FILE" || { warning " Argo $(text 38) "; return 1; }
+  check_arch
+  CANDIDATE=$(mktemp "$WORK_DIR/.cloudflared-update.XXXXXX") || return 1
+  if ! download_cloudflared "$CANDIDATE"; then
+    warning " $(text 203) "
+    return 1
+  fi
+  LOCAL=$("$WORK_DIR/cloudflared" --version 2>/dev/null | awk '{print $3}')
+  ONLINE=$("$CANDIDATE" --version | awk '{print $3}')
+  info " Argo: $LOCAL -> $ONLINE "
+  if [ "$LOCAL" = "$ONLINE" ]; then
+    rm -f "$CANDIDATE"
+    info " $(text 41) "
+    return 0
+  fi
+  reading " $(text 9) " UPDATE
+  if [ "${UPDATE,,}" != y ]; then
+    rm -f "$CANDIDATE"
+    return 0
+  fi
+  cmd_systemctl status argo &>/dev/null && RUNNING=1
+  BACKUP=$(mktemp "$WORK_DIR/.cloudflared-backup.XXXXXX") || { rm -f "$CANDIDATE"; return 1; }
+  cp -p "$WORK_DIR/cloudflared" "$BACKUP" && mv -f "$CANDIDATE" "$WORK_DIR/cloudflared" || {
+    rm -f "$CANDIDATE" "$BACKUP"
+    return 1
+  }
+  if [ "$RUNNING" = 1 ]; then
+    # restart 保留开机启动状态；已关闭的 Argo 只替换文件。
+    if ! cmd_systemctl restart argo; then
+      RUNNING=2
+    else
+      sleep 2
+      cmd_systemctl status argo &>/dev/null || RUNNING=2
+    fi
+    if [ "$RUNNING" = 2 ]; then
+      mv -f "$BACKUP" "$WORK_DIR/cloudflared" || { warning " Argo $(text 38): $BACKUP "; return 1; }
+      warning " $(text 204) "
+      if cmd_systemctl restart argo; then
+        sleep 2
+        if cmd_systemctl status argo &>/dev/null; then
+          argo_update_refresh_domain || return 1
+        else
+          warning " Argo $(text 38) "
+        fi
+      else
+        warning " Argo $(text 38) "
+      fi
+      return 1
+    fi
+  fi
+  rm -f "$BACKUP"
+  info " Argo $(text 37): $ONLINE "
+  if [ "$RUNNING" = 1 ]; then
+    argo_update_refresh_domain || return 1
+  fi
+  return 0
+}
+
 # Sing-box 的最新版本
 version() {
   # 获取需要下载的 sing-box 版本
@@ -7238,12 +7361,13 @@ menu_setting() {
     OPTION[4]="4 .  $(text 92)"
     OPTION[5]="5 .  $(text 121)"
     OPTION[6]="6 .  $(text 31)"
-    OPTION[7]="7 .  $(text 32)"
-    OPTION[8]="8 .  $(text 62)"
-    OPTION[9]="9 .  $(text 33)"
-    OPTION[10]="10.  $(text 59)"
-    OPTION[11]="11.  $(text 69)"
-    OPTION[12]="12.  $(text 76)"
+    OPTION[7]="7 .  $(text 202)"
+    OPTION[8]="8 .  $(text 32)"
+    OPTION[9]="9 .  $(text 62)"
+    OPTION[10]="10.  $(text 33)"
+    OPTION[11]="11.  $(text 59)"
+    OPTION[12]="12.  $(text 69)"
+    OPTION[13]="13.  $(text 76)"
 
     ACTION[1]() { export_list; exit 0; }
 
@@ -7273,12 +7397,13 @@ menu_setting() {
     ACTION[4]() { change_argo; exit; }
     ACTION[5]() { change_config; exit; }
     ACTION[6]() { version; exit; }
-    ACTION[7]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
-    ACTION[8]() { change_protocols; exit; }
-    ACTION[9]() { uninstall; exit; }
-    ACTION[10]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/argox/main/argox.sh) -$L; exit; }
-    ACTION[11]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/sba/main/sba.sh) -$L; exit; }
-    ACTION[12]() { bash <(wget --no-check-certificate -qO- https://tcp.hy2.sh/); exit; }
+    ACTION[7]() { argo_version; exit $?; }
+    ACTION[8]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
+    ACTION[9]() { change_protocols; exit; }
+    ACTION[10]() { uninstall; exit; }
+    ACTION[11]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/argox/main/argox.sh) -$L; exit; }
+    ACTION[12]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/sba/main/sba.sh) -$L; exit; }
+    ACTION[13]() { bash <(wget --no-check-certificate -qO- https://tcp.hy2.sh/); exit; }
   else
     OPTION[1]="1.  $(text 115)"
     OPTION[2]="2.  $(text 34) + Argo + $(text 80) $(text 89)"
