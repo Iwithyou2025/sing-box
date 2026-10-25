@@ -2325,7 +2325,7 @@ argo_manual_wait_domain() {
   done
 }
 
-# After the new Quick Tunnel hostname appears, allow up to 5 seconds for DNS/HTTPS
+# After the new Quick Tunnel hostname appears, allow up to 10 seconds for DNS/HTTPS
 # readiness. Transient failures with NO HTTP response (curl HTTP 000) are retried.
 # Any real HTTP status other than exactly 200 aborts immediately, including 530.
 # Keep this manual path separate from the argo-monitor's polling/rebuild logic.
@@ -2343,7 +2343,7 @@ argo_manual_domain_healthy() {
     fi
   fi
   START=$(argo_manual_clock_us)
-  DEADLINE=$((START + 5000000))
+  DEADLINE=$((START + 10000000))
   while :; do
     NOW=$(argo_manual_clock_us)
     REMAIN=$((DEADLINE - NOW))
@@ -2375,7 +2375,7 @@ argo_manual_domain_healthy() {
       warning " HTTPS $CODE for $DOMAIN; canceling tunnel publication and preserving subscriptions. "
       return 1
     fi
-    # HTTP 000 / no HTTP response: retry quickly until the overall 5s budget.
+    # HTTP 000 / no HTTP response: retry quickly until the overall 10s budget.
     NOW=$(argo_manual_clock_us)
     REMAIN=$((DEADLINE - NOW))
     [ "$REMAIN" -gt 0 ] || break
@@ -2386,7 +2386,7 @@ argo_manual_domain_healthy() {
       sleep "$PAUSE"
     fi
   done
-  warning " Quick Tunnel HTTPS received no HTTP response within 5 seconds (last curl exit $LAST_RC); subscriptions unchanged. "
+  warning " Quick Tunnel HTTPS received no HTTP response within 10 seconds (last curl exit $LAST_RC); subscriptions unchanged. "
   return 1
 }
 
@@ -6000,7 +6000,7 @@ argo_monitor_sync() {
           sed -i "s|^command=\"/usr/bin/sb\"$|command=\"${WORK_DIR}/sb.sh\"|" "$FILE" || return 1
           UNIT_CHANGED=1
         fi
-        if [ "$UNIT_CHANGED" = 1 ]; then
+        if [ "$UNIT_CHANGED" = 1 ] || [ "${SB_MONITOR_FORCE_REFRESH:-0}" = 1 ]; then
           rc-update add argo-monitor default >/dev/null 2>&1 || return 1
           rc-service argo-monitor restart >/dev/null 2>&1 ||
             rc-service argo-monitor start >/dev/null 2>&1 || return 1
@@ -6016,7 +6016,7 @@ argo_monitor_sync() {
           systemctl daemon-reload || return 1
           UNIT_CHANGED=1
         fi
-        if [ "$UNIT_CHANGED" = 1 ]; then
+        if [ "$UNIT_CHANGED" = 1 ] || [ "${SB_MONITOR_FORCE_REFRESH:-0}" = 1 ]; then
           systemctl enable argo-monitor.service >/dev/null 2>&1 || return 1
           systemctl restart argo-monitor.service >/dev/null 2>&1 || return 1
         elif ! systemctl is-enabled --quiet argo-monitor.service ||
@@ -6121,27 +6121,57 @@ argo_monitor_publish_domain() {
     printf '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n' "$CANDIDATE"
     return 1
   fi
-  # 子进程仅针对本次导出复用验证过的域名，避免二次取值导致竞态。
-  if (ARGO_MONITOR_VERIFIED_DOMAIN="$CANDIDATE"; fetch_quicktunnel_domain &&
-       export_list >/dev/null 2>&1) &&
+  # Reuse manual switching's snapshot/rollback: the domain pointer AND WS conf
+  # must be restored if template generation or subscription publication fails.
+  # Auto monitor never restarts Argo during this publication.
+  if ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$CANDIDATE" "$PREVIOUS" &&
        [ "$(sed -n '1p' "$WORK_DIR/argo-domain" 2>/dev/null)" = "$CANDIDATE" ]; then
     printf '[argo-monitor] completed: HTTP verified; subscriptions updated: %s\n' "$CANDIDATE"
     return 0
   fi
-  # 发布失败后维持旧域名指针，下轮继续检查并重试同步。
-  if [[ "$PREVIOUS" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]]; then
-    printf '%s\n' "$PREVIOUS" > "$WORK_DIR/argo-domain"
-  else
-    rm -f "$WORK_DIR/argo-domain"
-  fi
   printf '[argo-monitor] WARNING: subscription refresh failed for %s\n' "$CANDIDATE"
   return 1
+}
+
+# A running Bash monitor keeps old function definitions after upstream updates.
+# Poll the exact GitHub ref the project launcher booted from, about every 5min;
+# only restart argo-monitor (never argo) when the remote script has changed.
+argo_monitor_code_refresh() {
+  local NOW TMP HASH REF="${SB_SCRIPT_REF:-main}"
+  [ -n "${SB_RUNNING_SCRIPT_SHA:-}" ] || return 0
+  [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ && "$REF" != *..* ]] || return 0
+  NOW=$(date +%s)
+  if [ "$NOW" -lt "${ARGO_MONITOR_NEXT_CODE_CHECK:-0}" ]; then return 0; fi
+  ARGO_MONITOR_NEXT_CODE_CHECK=$((NOW + 300))
+  TMP=$(mktemp /tmp/argo-monitor-code.XXXXXXXX) || return 0
+  if ! wget --no-check-certificate -q --tries=1 --timeout=8 -O "$TMP" \
+       "https://raw.githubusercontent.com/Iwithyou2025/sing-box/$REF/sing-box.sh" ||
+       [ ! -s "$TMP" ]; then
+    rm -f "$TMP"
+    return 0
+  fi
+  HASH=$(sha256sum "$TMP" | awk '{print $1}')
+  rm -f "$TMP"
+  [ -n "$HASH" ] && [ "$HASH" != "$SB_RUNNING_SCRIPT_SHA" ] || return 0
+  printf '[argo-monitor] new script version detected; refreshing monitor only (Argo unchanged)\n'
+  if [ "$SYSTEM" = Alpine ]; then
+    # OpenRC restarts the launcher, which downloads the new script.
+    rc-service argo-monitor restart >/dev/null 2>&1 && return 2
+  else
+    # Avoid blocking on stopping this very same process.
+    systemctl --no-block restart argo-monitor.service >/dev/null 2>&1 && return 2
+  fi
+  echo '[argo-monitor] WARNING: failed to schedule monitor code refresh; will retry'
+  ARGO_MONITOR_NEXT_CODE_CHECK=0
+  return 0
 }
 
 # 54秒检测、连续2次失败、HTTPS连接超时3秒、连续10次自动重建后冷却600秒。
 argo_monitor_loop() {
   local FAILURES=0 DOMAIN LIVE_DOMAIN NEW_DOMAIN NOW LAST ATTEMPTS
   while sleep 54; do
+    argo_monitor_code_refresh
+    [ "$?" -eq 2 ] && return 0
     [ -d "$WORK_DIR/.argo-change.lock" ] && { FAILURES=0; continue; }
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
     # 尊重用户主动禁用 Argo 的操作。
@@ -7154,15 +7184,24 @@ create_shortcut() {
   # 测试分支可通过 SB_SCRIPT_REF 绑定独立的远程脚本入口；正式安装默认 main。
   local REF="${SB_SCRIPT_REF:-main}"
   [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ && "$REF" != *..* ]] || { echo "Invalid SB_SCRIPT_REF" >&2; return 1; }
-  cat > ${WORK_DIR}/sb.sh << EOF
+  cat > "${WORK_DIR}/sb.sh" << EOF
 #!/usr/bin/env bash
-
-SB_SCRIPT_REF="$REF" bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/Iwithyou2025/sing-box/$REF/sing-box.sh) \$@
+# Project-owned launcher: download one complete script and pass its digest to the
+# monitor so it can detect upstream changes without restarting Argo.
+SCRIPT_TMP=\$(mktemp /tmp/sing-box-script.XXXXXXXX) || exit 1
+trap 'rm -f "\$SCRIPT_TMP"' EXIT
+wget --no-check-certificate --timeout=10 --tries=2 -qO "\$SCRIPT_TMP" "https://raw.githubusercontent.com/Iwithyou2025/sing-box/$REF/sing-box.sh" || exit 1
+[ -s "\$SCRIPT_TMP" ] || exit 1
+SCRIPT_SHA=\$(sha256sum "\$SCRIPT_TMP" | awk '{print \$1}')
+[ -n "\$SCRIPT_SHA" ] || exit 1
+SB_SCRIPT_REF="$REF" SB_RUNNING_SCRIPT_SHA="\$SCRIPT_SHA" bash "\$SCRIPT_TMP" "\$@"
 EOF
   chmod +x ${WORK_DIR}/sb.sh
   ln -sf ${WORK_DIR}/sb.sh /usr/bin/sb
   [ -s /usr/bin/sb ] && info "\n $(text 71) "
-  argo_monitor_sync
+  # Installing/updating the wrapper must replace the long-running monitor process
+  # once so it takes the current downloaded code; do NOT restart the Argo tunnel.
+  SB_MONITOR_FORCE_REFRESH=1 argo_monitor_sync
 }
 
 # 增加或删除协议
