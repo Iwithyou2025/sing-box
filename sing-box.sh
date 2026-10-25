@@ -2283,7 +2283,7 @@ change_argo() {
   local WAS_RUNNING=0 ARGO_NEW_ARGS='' JSON_FILE='' YAML_FILE=''
   TYPE=$(argo_current_type) || { warning " Unknown Argo configuration; no changes made. "; return 1; }
   CURRENT=$(grep -E '^(ExecStart=|command_args=)' "$ARGO_DAEMON_FILE" | head -n 1)
-  OLD_DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR/argo-domain" 2>/dev/null | head -n 1)
+  OLD_DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR/argo-domain" 2>/dev/null | head -n 1 || true)
   if [ "$TYPE" = Try ]; then
     hint " Current Argo: Try  ${OLD_DOMAIN:+($OLD_DOMAIN)} "
     reading " Rebuild the current temporary tunnel? [y/N]: " OPTION
