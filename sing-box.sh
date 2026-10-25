@@ -1259,7 +1259,7 @@ change_config() {
   if [ "$KEY" = "name" ]; then
     node_country_flag_load || return 1
     NEW_VAL=$(node_name_with_flag "$NEW_VAL" "$NODE_COUNTRY_FLAG") || {
-      warning " Invalid node name: provide text without quotes, backslashes or control characters. "
+      warning " $(i18n_message "节点名称无效：不能包含引号、反斜杠或控制字符。" "Invalid node name: provide text without quotes, backslashes or control characters.") "
       return 1
     }
     node_name_replace_files "$OLD" "$NEW_VAL" || return 1
