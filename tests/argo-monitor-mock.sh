@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source <(sed -n \
+  -e '/^i18n_message() {/,/^}/p' \
   -e '/^argo_manual_publish_domain() {/,/^}/p' \
   -e '/^argo_monitor_live_domain() {/,/^}/p' \
   -e '/^argo_monitor_domain_healthy() {/,/^}/p' \
