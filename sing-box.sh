@@ -2260,7 +2260,7 @@ input_argo_auth() {
 # 类型只由已安装的 service 参数确定；未知配置不作任何修改。
 argo_change_type() {
   local CONFIG
-  CONFIG=$(grep -E '^(command_args=|ExecStart=)' "$ARGO_DAEMON_FILE") || return 1
+  CONFIG=$(grep -E '^(command=|command_args=|ExecStart=)' "$ARGO_DAEMON_FILE") || return 1
   [[ "$CONFIG" == *"$WORK_DIR/cloudflared"* ]] || return 1
   case "$CONFIG" in
     *--url*) echo Try ;;
@@ -2346,7 +2346,7 @@ argo_change_run() (
   if [ "$TYPE" = Try ]; then
     cmd_systemctl restart argo && sleep 2 && cmd_systemctl status argo >/dev/null 2>&1 || return 1
     LIVE=$(argo_monitor_wait_domain) || { warning " No Quick Tunnel hostname after restart. "; return 1; }
-    ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_monitor_publish_domain "$LIVE" "$OLD_DOMAIN"
+    ARGO_CHANGE_ALLOW_PUBLISH=1 ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_monitor_publish_domain "$LIVE" "$OLD_DOMAIN"
     return $?
   fi
   if [ "$ACTION" = reconnect ]; then
@@ -5941,6 +5941,9 @@ argo_monitor_wait_domain() {
 # 新域名必须通过公网 HTTPS 的 HTTP 2xx 检查，才调用现有配置/订阅更新函数。
 argo_monitor_publish_domain() {
   local CANDIDATE=$1 PREVIOUS=$2
+  if [ -d "$WORK_DIR/.argo-change.lock" ] && [ "${ARGO_CHANGE_ALLOW_PUBLISH:-0}" != 1 ]; then
+    return 1
+  fi
   if ! argo_monitor_domain_healthy "$CANDIDATE"; then
     printf '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n' "$CANDIDATE"
     return 1
