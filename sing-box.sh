@@ -6170,8 +6170,9 @@ argo_monitor_code_refresh() {
 argo_monitor_loop() {
   local FAILURES=0 DOMAIN LIVE_DOMAIN NEW_DOMAIN NOW LAST ATTEMPTS
   while sleep 54; do
-    argo_monitor_code_refresh
-    [ "$?" -eq 2 ] && return 0
+    local CODE_REFRESH_RESULT=0
+    argo_monitor_code_refresh || CODE_REFRESH_RESULT=$?
+    [ "$CODE_REFRESH_RESULT" -eq 2 ] && return 0
     [ -d "$WORK_DIR/.argo-change.lock" ] && { FAILURES=0; continue; }
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
     # 尊重用户主动禁用 Argo 的操作。
