@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 s=Path("sing-box.sh").read_text()
 for name in ["argo_change_type","argo_change_lock","argo_change_valid_domain","argo_change_healthy","argo_change_rollback","argo_change_run","change_argo","export_argo_json_file"]:
- m=re.search(r'^'+name+r'\(\) \{',s,re.M);assert m,name
+ m=re.search(r'^'+name+r'\(\) [\{\(]',s,re.M);assert m,name
  n=re.search(r'^[A-Za-z_][\w-]*\(\) \{',s[m.end():],re.M)
  print(s[m.start():m.end()+n.start()] if n else s[m.start():])
 PY
