@@ -11,6 +11,7 @@ on:
       - 'tests/test_node_name_flag.sh'
       - 'tests/test_nginx_ws_read_timeout.sh'
       - 'tests/test_argo_update.sh'
+      - 'tests/test_argo_change.sh'
   workflow_dispatch:
 
 jobs:
@@ -43,6 +44,10 @@ jobs:
       - name: Nginx WebSocket read-timeout and regeneration regression
         shell: bash
         run: bash tests/test_nginx_ws_read_timeout.sh
+
+      - name: Argo type-preserving tunnel change regression
+        shell: bash
+        run: bash tests/test_argo_change.sh
 
       - name: Argo update and rollback regression
         shell: bash
