@@ -71,6 +71,14 @@ setup Token; [ "$(argo_change_type)" = Token ]
 setup Json; [ "$(argo_change_type)" = Json ]
 setup Try; INPUTS=(n); change_argo; ! grep -q restart "$EVENTS"; clean
 setup Try; INPUTS=(y); change_argo; grep -qx 'restart argo' "$EVENTS"; grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"; clean
+# An HTTP rejection (such as Cloudflare 530) cancels manual publication.
+# The tunnel was restarted once, but current domain and subscription remain unchanged.
+setup Try; INPUTS=(y); HTTPS=0
+echo old.trycloudflare.com > "$WORK_DIR/argo-domain"
+if change_argo; then echo 'HTTP failure did not abort manual switch' >&2; exit 1; fi
+grep -qx 'restart argo' "$EVENTS"
+grep -qx old.trycloudflare.com "$WORK_DIR/argo-domain"
+grep -qx original "$WORK_DIR/subscribe/output"; clean
 setup Token; INPUTS=(1); change_argo; grep -Fq "$TOKEN_OLD" "$ARGO_DAEMON_FILE"; grep -qx 'restart argo' "$EVENTS"; clean
 setup Token; INPUTS=(2 new.example.com "$TOKEN_NEW"); change_argo
 grep -Fq "$TOKEN_NEW" "$ARGO_DAEMON_FILE"; grep -q -- --token "$ARGO_DAEMON_FILE"
