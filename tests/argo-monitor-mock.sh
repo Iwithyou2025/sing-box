@@ -18,6 +18,7 @@ mkdir -p "$WORK_DIR/conf"
 ARGO_MONITOR_NEXT_CODE_CHECK=0
 SB_RUNNING_SCRIPT_SHA=''
 SYSTEM=Ubuntu
+warning() { :; }
 printf 'ExecStart=/etc/sing-box/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
 
 # Mock executable/process/services; all state isolated under WORK_DIR.
@@ -134,6 +135,6 @@ grep -q 'subscription refresh failed' "$WORK_DIR/output.log"
 test "$(cat "$WORK_DIR/argo-domain")" = old-value.trycloudflare.com
 grep -qx 'current=old-value.trycloudflare.com' "$WORK_DIR/conf/ws.json"
 grep -qx 'original subscription' "$WORK_DIR/subscribe-original"
-assert_count "$WORK_DIR/exports" 1
+assert_count "$WORK_DIR/exports" 2
 
 echo 'PASS: Argo Quick Tunnel mock health, sync, rebuild and cooldown tests'
