@@ -217,7 +217,7 @@ for LOCALE_TEST in C C.UTF-8; do
   assert_eq "${WAN4:-}${EMOJI4:-}" ''
   # Dual-provider disagreement: ipdata country_code/flag wins for the same IPv4.
   GEO4='{"ip":"192.0.2.44","country":"United States","emoji":"🇺🇸","isp":"Primary ISP"}'
-  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  GEO4_IPDATA='{"ip":"192.0.2.44","country":"DE","org":"Secondary ISP"}'
   unset SYSTEM_IP_CHECKED
   check_system_ip
   assert_eq "$WAN4" '192.0.2.44'
@@ -225,13 +225,13 @@ for LOCALE_TEST in C C.UTF-8; do
   assert_eq "$COUNTRY4" 'DE'
   # When the providers agree, retain the primary response.
   GEO4='{"ip":"192.0.2.44","country":"Germany","emoji":"🇩🇪","isp":"Primary ISP"}'
-  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  GEO4_IPDATA='{"ip":"192.0.2.44","country":"DE","org":"Secondary ISP"}'
   unset SYSTEM_IP_CHECKED
   check_system_ip
   assert_eq "$EMOJI4" '🇩🇪'
   # If the primary source fails, use a valid ipdata response.
   GEO4=''
-  GEO4_IPDATA='{"ip":"192.0.2.44","country_code":"DE","country_name":"Germany","flag":{"emoji":"🇩🇪"},"organisation":"Secondary ISP"}'
+  GEO4_IPDATA='{"ip":"192.0.2.44","country":"DE","org":"Secondary ISP"}'
   unset SYSTEM_IP_CHECKED
   check_system_ip
   assert_eq "$WAN4" '192.0.2.44'
