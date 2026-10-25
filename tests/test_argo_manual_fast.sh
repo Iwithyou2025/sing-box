@@ -20,7 +20,7 @@ info() { :; }; warning() { :; }
 ps() { echo "1234 $WORK_DIR/cloudflared tunnel --url http://localhost:8000"; }
 ss() { echo 'LISTEN 0 128 127.0.0.1:12345 0.0.0.0:* users:(("cloudflared",pid=1234,fd=7))'; }
 curl() {
-  if [[ " $* " == *" /quicktunnel"* ]]; then
+  if [[ "${!#}" == */quicktunnel ]]; then
     [[ " $* " == *" --noproxy * "* && " $* " == *" --max-time "* ]] || {
       echo "metrics request must bypass proxies and have a timeout: $*" >&2; return 1;
     }
