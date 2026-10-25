@@ -2325,18 +2325,55 @@ argo_manual_wait_domain() {
   done
 }
 
-# One HTTPS GET, single attempt, 1s total timeout; retain original curl diagnostics.
+# After the new Quick Tunnel hostname appears, allow up to 5 seconds for DNS/HTTPS
+# readiness. Transient failures with NO HTTP response (curl HTTP 000) are retried.
+# Any real HTTP status other than exactly 200 aborts immediately, including 530.
+# Keep this manual path separate from the argo-monitor's polling/rebuild logic.
 argo_manual_domain_healthy() {
-  local DOMAIN="$1" CODE RC
+  local DOMAIN="$1" START DEADLINE NOW REMAIN LIMIT PAUSE CODE RC LAST_RC=0
   command -v curl >/dev/null 2>&1 || { warning " curl is missing "; return 1; }
-  CODE=$(curl -sS -L --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
-  RC=$?
-  if [ "$RC" -ne 0 ]; then
-    warning " HTTPS request failed: curl exit $RC "
-    return 1
-  fi
-  [[ "$CODE" =~ ^2[0-9][0-9]$ ]] || { warning " HTTPS returned HTTP $CODE "; return 1; }
-  info " HTTPS $CODE "
+  START=$(argo_manual_clock_us)
+  DEADLINE=$((START + 5000000))
+  while :; do
+    NOW=$(argo_manual_clock_us)
+    REMAIN=$((DEADLINE - NOW))
+    [ "$REMAIN" -gt 0 ] || break
+    if [ "$REMAIN" -ge 1000000 ]; then
+      LIMIT=1
+    else
+      printf -v LIMIT '0.%06d' "$REMAIN"
+    fi
+    # Do not follow redirects: a 3xx response is a non-200 terminal result.
+    # -s suppresses repeated transient DNS errors; final failure is reported below.
+    CODE=$(curl -s --connect-timeout "$LIMIT" --max-time "$LIMIT" \
+      -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
+    RC=$?
+    LAST_RC=$RC
+    if [ "$CODE" = 200 ]; then
+      if [ "$RC" -eq 0 ]; then
+        info " HTTPS 200 "
+        return 0
+      fi
+      warning " HTTPS returned HTTP 200 but transfer failed (curl exit $RC); subscriptions unchanged. "
+      return 1
+    fi
+    if [[ "$CODE" =~ ^[1-9][0-9][0-9]$ ]]; then
+      warning " HTTPS returned HTTP $CODE; canceling tunnel publication and preserving subscriptions. "
+      return 1
+    fi
+    # HTTP 000 / no HTTP response: retry quickly until the overall 5s budget.
+    NOW=$(argo_manual_clock_us)
+    REMAIN=$((DEADLINE - NOW))
+    [ "$REMAIN" -gt 0 ] || break
+    if [ "$REMAIN" -gt 200000 ]; then
+      sleep 0.2
+    else
+      printf -v PAUSE '0.%06d' "$REMAIN"
+      sleep "$PAUSE"
+    fi
+  done
+  warning " Quick Tunnel HTTPS received no HTTP response within 5 seconds (last curl exit $LAST_RC); subscriptions unchanged. "
+  return 1
 }
 
 # Only reuse subscription publication; do not invoke the monitor's wait/health/rebuild path.
@@ -2438,7 +2475,7 @@ argo_change_run() (
     }
     info " New Argo domain: $LIVE "
     argo_manual_domain_healthy "$LIVE" || {
-      warning " Quick Tunnel HTTPS single 1-second check failed; subscriptions unchanged. "
+      warning " Quick Tunnel HTTPS verification failed; no subscription/configuration update performed. "
       return 1
     }
     ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
