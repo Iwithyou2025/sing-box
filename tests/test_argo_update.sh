@@ -63,10 +63,3 @@ reset_case; FAIL_START=1; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url htt
 reset_case; DOMAIN_FAIL=1; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; assert_version 2026.10.0; ! grep -qx export "$EVENTS"; assert_clean
 reset_case; PROXY_FAIL=1; argo_version; assert_version 2026.10.0; [ "$(grep -c '^download ' "$EVENTS")" = 2 ]; grep -q '^download https://github.com/' "$EVENTS"; assert_clean
 echo 'PASS: Argo update, stopped service, decline, same version, download/validation failure, rollback, Quick Tunnel refresh and ownership checks'
- "$EVENTS")" = 1 ]; assert_clean
-reset_case; rm "$ARGO_DAEMON_FILE"; argo_version; [ ! -s "$EVENTS" ]; assert_version 2026.1.0
-reset_case; echo 'ExecStart=/other/cloudflared' > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; [ ! -s "$EVENTS" ]
-reset_case; FAIL_START=1; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; assert_version 2026.1.0; grep -qx domain "$EVENTS"; grep -qx export "$EVENTS"; assert_clean
-reset_case; DOMAIN_FAIL=1; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; assert_version 2026.10.0; ! grep -qx export "$EVENTS"; assert_clean
-reset_case; PROXY_FAIL=1; argo_version; assert_version 2026.10.0; [ "$(grep -c '^download ' "$EVENTS")" = 2 ]; grep -q '^download https://github.com/' "$EVENTS"; assert_clean
-echo 'PASS: Argo update, stopped service, decline, same version, download/validation failure, rollback, Quick Tunnel refresh and ownership checks'
