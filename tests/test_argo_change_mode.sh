@@ -19,7 +19,17 @@ check_install() { :; }
 fetch_nodes_value() { ARGO_DOMAIN=old.example.com; PORT_NGINX=8000; }
 sleep() { :; }; systemctl() { :; }
 curl() { if [ "$HTTPS" = 1 ]; then echo 200; else echo 503; fi; }
-argo_manual_live_domain() { echo new.trycloudflare.com; }
+argo_manual_live_domain() {
+  case "${MOCK_LIVE_MODE:-stable}" in
+    stable) echo new.trycloudflare.com ;;
+    changed)
+      local COUNT
+      COUNT=$(cat "$WORK_DIR/live-reads" 2>/dev/null || echo 0)
+      echo "$((COUNT+1))" > "$WORK_DIR/live-reads"
+      if [ "$COUNT" -eq 0 ]; then echo new.trycloudflare.com; else echo rotated.trycloudflare.com; fi ;;
+    *) return 1 ;;
+  esac
+}
 argo_manual_domain_healthy() { [ "$HTTPS" = 1 ]; }
 argo_manual_publish_domain() { [ "$EXPORT" = 1 ] && echo "$1" > "$WORK_DIR/argo-domain"; }
 create_argo_tunnel() { echo API >> "$EVENTS"; ARGO_TOKEN=$TOKEN_NEW; ARGO_JSON=$JSON_NEW; }
@@ -52,7 +62,7 @@ setup() {
  printf '{"server_name":"old.example.com","test":1}\n' > "$WORK_DIR/conf/18_vless-ws-tls_inbounds.json"
  echo original > "$WORK_DIR/subscribe/output"
  echo origin > "$WORK_DIR/list"
- SYSTEM=Ubuntu ACTIVE=1 RESTART=1 HTTPS=1 EXPORT=1 POSITION=0
+ SYSTEM=Ubuntu ACTIVE=1 RESTART=1 HTTPS=1 EXPORT=1 POSITION=0 MOCK_LIVE_MODE=stable
  STATUS=(running running); INPUTS=()
  case "$TYPE" in
   Try) printf 'ExecStart=%s/cloudflared tunnel --url http://localhost:8000\n' "$WORK_DIR" > "$ARGO_DAEMON_FILE";;
@@ -71,6 +81,13 @@ setup Token; [ "$(argo_change_type)" = Token ]
 setup Json; [ "$(argo_change_type)" = Json ]
 setup Try; INPUTS=(n); change_argo; ! grep -q restart "$EVENTS"; clean
 setup Try; INPUTS=(y); change_argo; grep -qx 'restart argo' "$EVENTS"; grep -qx new.trycloudflare.com "$WORK_DIR/argo-domain"; clean
+# If Argo unexpectedly restarts after the HTTP 200 check, never publish the stale host.
+setup Try; INPUTS=(y); MOCK_LIVE_MODE=changed
+echo old.trycloudflare.com > "$WORK_DIR/argo-domain"
+if change_argo; then echo 'stale tunnel domain was published' >&2; exit 1; fi
+grep -qx old.trycloudflare.com "$WORK_DIR/argo-domain"
+grep -qx original "$WORK_DIR/subscribe/output"
+[ "$(cat "$WORK_DIR/live-reads")" -eq 2 ]; clean
 # An HTTP rejection (such as Cloudflare 530) cancels manual publication.
 # The tunnel was restarted once, but current domain and subscription remain unchanged.
 setup Try; INPUTS=(y); HTTPS=0
