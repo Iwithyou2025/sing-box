@@ -56,7 +56,7 @@ reset_case; NEW_VERSION=2026.1.0; argo_version; assert_version 2026.1.0; ! grep 
 reset_case; DOWNLOAD_FAIL=1; if argo_version; then exit 1; fi; assert_version 2026.1.0; assert_clean
 reset_case; INVALID=1; if argo_version; then exit 1; fi; assert_version 2026.1.0; assert_clean
 reset_case; FAIL_START=1; if argo_version; then exit 1; fi; assert_version 2026.1.0; [ "$(grep -c '^restart argo$' "$EVENTS")" = 2 ]; assert_clean
-reset_case; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; argo_version; grep -qx domain "$EVENTS"; grep -qx export "$EVENTS"; ! grep -qx 'enable argo' "$EVENTS"; [ "$(grep -c '^domain
+reset_case; STATUS[1]=$(text 28); echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; argo_version; grep -qx domain "$EVENTS"; grep -qx export "$EVENTS"; ! grep -qx 'enable argo' "$EVENTS"; [ "$(grep -c '^domain$' "$EVENTS")" = 1 ]; assert_clean
 reset_case; rm "$ARGO_DAEMON_FILE"; argo_version; [ ! -s "$EVENTS" ]; assert_version 2026.1.0
 reset_case; echo 'ExecStart=/other/cloudflared' > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; [ ! -s "$EVENTS" ]
 reset_case; FAIL_START=1; echo "ExecStart=$WORK_DIR/cloudflared tunnel --url http://localhost:8888" > "$ARGO_DAEMON_FILE"; if argo_version; then exit 1; fi; assert_version 2026.1.0; grep -qx domain "$EVENTS"; grep -qx export "$EVENTS"; assert_clean
