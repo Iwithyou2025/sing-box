@@ -2331,23 +2331,37 @@ argo_manual_wait_domain() {
 # Keep this manual path separate from the argo-monitor's polling/rebuild logic.
 argo_manual_domain_healthy() {
   local DOMAIN="$1" START DEADLINE NOW REMAIN LIMIT PAUSE CODE RC LAST_RC=0
+  local -a IP_FAMILY=()
   command -v curl >/dev/null 2>&1 || { warning " curl is missing "; return 1; }
+  # Match the successful VPS diagnostic: bypass inherited proxies and prefer IPv4
+  # where the host has an IPv4 route; retain IPv6-only compatibility.
+  if command -v ip >/dev/null 2>&1; then
+    if ip -4 route get 1.1.1.1 >/dev/null 2>&1; then
+      IP_FAMILY=(-4)
+    elif ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then
+      IP_FAMILY=(-6)
+    fi
+  fi
   START=$(argo_manual_clock_us)
   DEADLINE=$((START + 5000000))
   while :; do
     NOW=$(argo_manual_clock_us)
     REMAIN=$((DEADLINE - NOW))
     [ "$REMAIN" -gt 0 ] || break
-    if [ "$REMAIN" -ge 1000000 ]; then
-      LIMIT=1
+    # Let one HTTP/TLS attempt take up to 3s (like the working manual curl),
+    # while preserving the original 5-second overall readiness deadline.
+    if [ "$REMAIN" -ge 3000000 ]; then
+      LIMIT=3
+    elif [ "$REMAIN" -ge 1000000 ]; then
+      printf -v LIMIT '%d.%06d' "$((REMAIN / 1000000))" "$((REMAIN % 1000000))"
     else
       printf -v LIMIT '0.%06d' "$REMAIN"
     fi
     # Do not follow redirects: a 3xx response is a non-200 terminal result.
     # -s suppresses repeated transient DNS errors; final failure is reported below.
     RC=0
-    CODE=$(curl -s --connect-timeout "$LIMIT" --max-time "$LIMIT" \
-      -o /dev/null -w '%{http_code}' "https://$DOMAIN/") || RC=$?
+    CODE=$(curl --noproxy '*' "${IP_FAMILY[@]}" -sS --connect-timeout "$LIMIT" --max-time "$LIMIT" \
+      -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || RC=$?
     LAST_RC=$RC
     if [ "$CODE" = 200 ]; then
       if [ "$RC" -eq 0 ]; then
@@ -2358,7 +2372,7 @@ argo_manual_domain_healthy() {
       return 1
     fi
     if [[ "$CODE" =~ ^[1-9][0-9][0-9]$ ]]; then
-      warning " HTTPS returned HTTP $CODE; canceling tunnel publication and preserving subscriptions. "
+      warning " HTTPS $CODE for $DOMAIN; canceling tunnel publication and preserving subscriptions. "
       return 1
     fi
     # HTTP 000 / no HTTP response: retry quickly until the overall 5s budget.
@@ -2475,9 +2489,20 @@ argo_change_run() (
     }
     info " New Argo domain: $LIVE "
     argo_manual_domain_healthy "$LIVE" || {
-      warning " Quick Tunnel HTTPS verification failed; no subscription/configuration update performed. "
+      warning " Quick Tunnel HTTPS verification failed for $LIVE; no subscription/configuration update performed. "
       return 1
     }
+    # A successful GET applies only to the exact currently running Quick Tunnel.
+    # A concurrent cloudflared restart must not publish an already-stale hostname.
+    local CONFIRMED_LIVE
+    CONFIRMED_LIVE=$(argo_manual_live_domain 1) || {
+      warning " Cannot confirm the active Quick Tunnel after HTTPS verification; subscriptions unchanged. "
+      return 1
+    }
+    if [ "$CONFIRMED_LIVE" != "$LIVE" ]; then
+      warning " Quick Tunnel hostname changed during verification ($LIVE -> $CONFIRMED_LIVE); subscriptions unchanged. "
+      return 1
+    fi
     ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 argo_manual_publish_domain "$LIVE" "$OLD_DOMAIN" || return 1
     info " Argo changed and subscriptions updated. "
     return 0
