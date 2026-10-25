@@ -2279,10 +2279,9 @@ change_argo() {
     return 1
   }
   [ -s "$ARGO_DAEMON_FILE" ] || return 1
-  local TYPE CURRENT OLD_DOMAIN OPTION NEW_AUTH='' NEW_DOMAIN='' STAGE='' MONITOR_RUNNING=0
-  local WAS_RUNNING=0 ARGO_NEW_ARGS='' JSON_FILE='' YAML_FILE=''
+  local TYPE OLD_DOMAIN OPTION NEW_AUTH='' NEW_DOMAIN='' STAGE='' MONITOR_RUNNING=0
+  local WAS_RUNNING=0 ARGO_NEW_ARGS='' JSON_FILE='' CHANGE_STATUS=0
   TYPE=$(argo_current_type) || { warning " Unknown Argo configuration; no changes made. "; return 1; }
-  CURRENT=$(grep -E '^(ExecStart=|command_args=)' "$ARGO_DAEMON_FILE" | head -n 1)
   OLD_DOMAIN=$(grep -ohE '[a-zA-Z0-9-]+[.]trycloudflare[.]com' "$WORK_DIR/argo-domain" 2>/dev/null | head -n 1 || true)
   if [ "$TYPE" = Try ]; then
     hint " Current Argo: Try  ${OLD_DOMAIN:+($OLD_DOMAIN)} "
@@ -2358,6 +2357,11 @@ EOF
   fi
 
   cmd_systemctl status argo >/dev/null 2>&1 && WAS_RUNNING=1
+  if [ "$WAS_RUNNING" = 0 ] && { [ "$TYPE" = Try ] || [ "$OPTION" = 1 ]; }; then
+    warning " Argo is currently stopped; no tunnel restart requested. "
+    rm -rf "$STAGE"
+    return 1
+  fi
   if [ "$SYSTEM" = Alpine ]; then
     rc-service argo-monitor status >/dev/null 2>&1 && MONITOR_RUNNING=1
   else
@@ -2403,6 +2407,7 @@ EOF
     rm -rf "$STAGE"
     return 1
   fi
+  [ "$WAS_RUNNING" = 1 ] && sleep 2
   if [ "$WAS_RUNNING" = 1 ] && ! cmd_systemctl status argo >/dev/null 2>&1; then
     warning " Argo failed health check; restoring previous configuration. "
     cp -p "$STAGE/service" "$ARGO_DAEMON_FILE"
@@ -2422,10 +2427,16 @@ EOF
   if [ "$TYPE" = Try ] && [ "$WAS_RUNNING" = 1 ]; then
     local NEW_QUICK_DOMAIN
     NEW_QUICK_DOMAIN=$(argo_monitor_wait_domain) || {
-      warning " Tunnel restarted but no valid temporary domain yet; monitor will retry. "
+      warning " Tunnel restarted but no valid temporary domain yet. "
       NEW_QUICK_DOMAIN=''
+      CHANGE_STATUS=1
     }
-    [ -n "$NEW_QUICK_DOMAIN" ] && argo_monitor_publish_domain "$NEW_QUICK_DOMAIN" "$OLD_DOMAIN"
+    if [ -n "$NEW_QUICK_DOMAIN" ]; then
+      ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 IS_ARGO_MONITOR=1 argo_monitor_publish_domain "$NEW_QUICK_DOMAIN" "$OLD_DOMAIN" || {
+        warning " Domain or subscription verification failed; monitor may retry. "
+        CHANGE_STATUS=1
+      }
+    fi
   elif [ "$OPTION" = 2 ]; then
     # 固定隧道更换认证后，仅在用户填写新域名时更新订阅。
     if [ -n "$NEW_DOMAIN" ]; then
@@ -2434,13 +2445,17 @@ EOF
         [ -f "$JSON_FILE" ] || continue
         sed -i -E "s|(\\\"VMESS_HOST_DOMAIN\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|;s|(\\\"server_name\\\"[[:space:]]*:[[:space:]]*\\\")[^\\\"]*|\\1$NEW_DOMAIN|" "$JSON_FILE"
       done
-      export_list || warning " Tunnel changed, but subscription refresh failed. "
+      ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 IS_ARGO_MONITOR=1 export_list || {
+        warning " Tunnel changed, but subscription refresh failed. "
+        CHANGE_STATUS=1
+      }
     fi
   fi
   [ "$MONITOR_RUNNING" = 1 ] && {
     if [ "$SYSTEM" = Alpine ]; then rc-service argo-monitor start; else systemctl start argo-monitor.service; fi
   }
   rm -rf "$STAGE"
+  [ "$CHANGE_STATUS" = 0 ] || return 1
   info " Argo: $TYPE operation completed. "
 }
 
