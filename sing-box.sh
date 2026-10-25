@@ -2417,9 +2417,9 @@ argo_change_run() (
   }
   if [ "$OLD_DOMAIN" != "$NEW_DOMAIN" ]; then
     [ ! -s "$WORK_DIR/conf/17_${NODE_TAG[6]}_inbounds.json" ] ||
-      sed -i "s/VMESS_HOST_DOMAIN.*/VMESS_HOST_DOMAIN\": \"$NEW_DOMAIN\"/" "$WORK_DIR/conf/17_${NODE_TAG[6]}_inbounds.json"
+      sed -i -E "s|(\"VMESS_HOST_DOMAIN\"[[:space:]]*:[[:space:]]*\")[^\"]*(\")|\\1$NEW_DOMAIN\\2|g" "$WORK_DIR/conf/17_${NODE_TAG[6]}_inbounds.json"
     [ ! -s "$WORK_DIR/conf/18_${NODE_TAG[7]}_inbounds.json" ] ||
-      sed -i "s/\"server_name\":.*/\"server_name\": \"$NEW_DOMAIN\",/" "$WORK_DIR/conf/18_${NODE_TAG[7]}_inbounds.json"
+      sed -i -E "s|(\"server_name\"[[:space:]]*:[[:space:]]*\")[^\"]*(\")|\\1$NEW_DOMAIN\\2|g" "$WORK_DIR/conf/18_${NODE_TAG[7]}_inbounds.json"
   fi
   ARGO_UPDATE_PRESERVE_SERVICE_STATE=1 export_list >/dev/null || return 1
   ROLLBACK=0
