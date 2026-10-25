@@ -11,6 +11,7 @@ on:
       - 'tests/test_node_name_flag.sh'
       - 'tests/test_nginx_ws_read_timeout.sh'
       - 'tests/test_argo_update.sh'
+      - 'tests/test_argo_change_mode.sh'
   workflow_dispatch:
 
 jobs:
@@ -47,3 +48,7 @@ jobs:
       - name: Argo update and rollback regression
         shell: bash
         run: bash tests/test_argo_update.sh
+
+      - name: Argo tunnel type and transaction regression
+        shell: bash
+        run: bash tests/test_argo_change_mode.sh
