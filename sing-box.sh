@@ -6082,6 +6082,69 @@ argo_monitor_domain_healthy() {
   fi
 }
 
+# Retry a newly allocated Quick Tunnel hostname until HTTPS is ready.
+# The 15s deadline includes all curl attempts and sleeps; retry every 500ms.
+argo_monitor_wait_healthy_domain() {
+  local DOMAIN="$1" WAIT_MS="${2:-15000}" NOW_US DEADLINE_US REMAIN_US REMAIN_MS
+  local HTTP_CODE='' EXIT_CODE=0 ATTEMPT=0 MAX_TIME SLEEP_US SLEEP_SEC
+  [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
+  [[ "$WAIT_MS" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    NOW_US=${EPOCHREALTIME/./}
+  else
+    NOW_US="$(date +%s)000000"
+  fi
+  DEADLINE_US=$((NOW_US + WAIT_MS * 1000))
+  while :; do
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+      NOW_US=${EPOCHREALTIME/./}
+    else
+      NOW_US="$(date +%s)000000"
+    fi
+    REMAIN_US=$((DEADLINE_US - NOW_US))
+    [ "$REMAIN_US" -gt 0 ] || break
+    REMAIN_MS=$(((REMAIN_US + 999) / 1000))
+    ATTEMPT=$((ATTEMPT + 1))
+
+    if command -v curl >/dev/null 2>&1; then
+      printf -v MAX_TIME '%d.%03d' "$((REMAIN_MS / 1000))" "$((REMAIN_MS % 1000))"
+      EXIT_CODE=0
+      HTTP_CODE=$(curl -sS -L --connect-timeout 3 --max-time "$MAX_TIME" -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || EXIT_CODE=$?
+      if [ "$EXIT_CODE" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+        return 0
+      fi
+      printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；HTTP=%s；curl退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; HTTP=%s; curl_exit=%s\n')" \
+        "$ATTEMPT" "$DOMAIN" "${HTTP_CODE:-000}" "$EXIT_CODE"
+    elif command -v wget >/dev/null 2>&1; then
+      # Fallback for hosts without curl. wget only reports its exit status.
+      if wget -q --spider --timeout="$(((REMAIN_MS + 999) / 1000))" --tries=1 "https://$DOMAIN/" >/dev/null 2>&1; then
+        return 0
+      else
+        EXIT_CODE=$?
+      fi
+      printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；wget退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; wget_exit=%s\n')" \
+        "$ATTEMPT" "$DOMAIN" "$EXIT_CODE"
+    else
+      echo "$(i18n_message '[argo-monitor] 警告：缺少 curl/wget，无法验证新域名 HTTPS' '[argo-monitor] WARNING: curl/wget missing; cannot verify candidate HTTPS')"
+      return 1
+    fi
+
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+      NOW_US=${EPOCHREALTIME/./}
+    else
+      NOW_US="$(date +%s)000000"
+    fi
+    REMAIN_US=$((DEADLINE_US - NOW_US))
+    [ "$REMAIN_US" -gt 0 ] || break
+    SLEEP_US=500000
+    [ "$REMAIN_US" -lt "$SLEEP_US" ] && SLEEP_US=$REMAIN_US
+    printf -v SLEEP_SEC '0.%06d' "$SLEEP_US"
+    sleep "$SLEEP_SEC"
+  done
+  return 1
+}
+
 # 获取域名最多等待10秒（仅读取、无文件副作用）。
 argo_monitor_wait_domain() {
   local DEADLINE=$((SECONDS + 10)) REMAIN HOST
@@ -6104,8 +6167,8 @@ argo_monitor_publish_domain() {
   if [ -d "$WORK_DIR/.argo-change.lock" ] && [ "${ARGO_CHANGE_ALLOW_PUBLISH:-0}" != 1 ]; then
     return 1
   fi
-  if ! argo_monitor_domain_healthy "$CANDIDATE"; then
-    printf "$(i18n_message '[argo-monitor] 警告：新域名未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain not HTTP-healthy: %s\n')" "$CANDIDATE"
+  if ! argo_monitor_wait_healthy_domain "$CANDIDATE"; then
+    printf "$(i18n_message '[argo-monitor] 警告：新域名在 15 秒内未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain did not pass HTTP health check within 15s: %s\n')" "$CANDIDATE"
     return 1
   fi
   # Reuse manual switching's snapshot/rollback: the domain pointer AND WS conf
@@ -6176,12 +6239,12 @@ argo_monitor_loop() {
 
     # cloudflared 自身重启获得新域名：验证后仅同步订阅，不算自动重建。
     LIVE_DOMAIN=$(argo_monitor_live_domain || true)
-    if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ] &&
-       argo_monitor_domain_healthy "$LIVE_DOMAIN"; then
-      printf "$(i18n_message '[argo-monitor] 域名变化：%s -> %s；正在同步订阅（不重启 Argo）\n' '[argo-monitor] domain changed: %s -> %s; syncing without Argo restart\n')" "$DOMAIN" "$LIVE_DOMAIN"
-      argo_monitor_publish_domain "$LIVE_DOMAIN" "$DOMAIN" || true
-      FAILURES=0
-      continue
+    if [ -n "$LIVE_DOMAIN" ] && [ "$LIVE_DOMAIN" != "$DOMAIN" ]; then
+      printf "$(i18n_message '[argo-monitor] 域名变化：%s -> %s；等待 HTTPS 验证（不重启 Argo）\n' '[argo-monitor] domain changed: %s -> %s; waiting for HTTPS verification (no Argo restart)\n')" "$DOMAIN" "$LIVE_DOMAIN"
+      if argo_monitor_publish_domain "$LIVE_DOMAIN" "$DOMAIN"; then
+        FAILURES=0
+        continue
+      fi
     fi
 
     if argo_monitor_domain_healthy "$DOMAIN"; then
