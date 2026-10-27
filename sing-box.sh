@@ -6087,8 +6087,11 @@ argo_monitor_domain_healthy() {
 argo_monitor_wait_healthy_domain() {
   local DOMAIN="$1" WAIT_MS="${2:-15000}" NOW_US DEADLINE_US REMAIN_US REMAIN_MS
   local HTTP_CODE='' EXIT_CODE=0 ATTEMPT=0 MAX_TIME SLEEP_US SLEEP_SEC
+  # Distinguish pending rebuild (no HTTP response) from an actual HTTP error.
+  ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
   [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
   [[ "$WAIT_MS" =~ ^[1-9][0-9]*$ ]] || return 1
+  ARGO_MONITOR_HTTPS_WAIT_RESULT='pending'
 
   if [ -n "${EPOCHREALTIME:-}" ]; then
     NOW_US=${EPOCHREALTIME/./}
@@ -6112,17 +6115,27 @@ argo_monitor_wait_healthy_domain() {
       EXIT_CODE=0
       HTTP_CODE=$(curl -sS -L --connect-timeout 3 --max-time "$MAX_TIME" -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || EXIT_CODE=$?
       if [ "$EXIT_CODE" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+        ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'
         return 0
       fi
-      printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；HTTP=%s；curl退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; HTTP=%s; curl_exit=%s\n')" \
-        "$ATTEMPT" "$DOMAIN" "${HTTP_CODE:-000}" "$EXIT_CODE"
+      if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = '000' ]; then
+        # curl 000 indicates NO HTTP status was received, not an HTTP error.
+        printf "$(i18n_message '[argo-monitor] 新域名重建中（第 %s 次）：%s；尚无 HTTP 响应（HTTP=000）；curl退出码=%s\n' '[argo-monitor] candidate tunnel is rebuilding (attempt %s): %s; no HTTP response (HTTP=000); curl_exit=%s\n')" \
+          "$ATTEMPT" "$DOMAIN" "$EXIT_CODE"
+      else
+        ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
+        printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；HTTP=%s；curl退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; HTTP=%s; curl_exit=%s\n')" \
+          "$ATTEMPT" "$DOMAIN" "$HTTP_CODE" "$EXIT_CODE"
+      fi
     elif command -v wget >/dev/null 2>&1; then
       # Fallback for hosts without curl. wget only reports its exit status.
       if wget -q --spider --timeout="$(((REMAIN_MS + 999) / 1000))" --tries=1 "https://$DOMAIN/" >/dev/null 2>&1; then
+        ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'
         return 0
       else
         EXIT_CODE=$?
       fi
+      ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
       printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；wget退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; wget_exit=%s\n')" \
         "$ATTEMPT" "$DOMAIN" "$EXIT_CODE"
     else
@@ -6168,7 +6181,11 @@ argo_monitor_publish_domain() {
     return 1
   fi
   if ! argo_monitor_wait_healthy_domain "$CANDIDATE"; then
-    printf "$(i18n_message '[argo-monitor] 警告：新域名在 15 秒内未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain did not pass HTTP health check within 15s: %s\n')" "$CANDIDATE"
+    if [ "${ARGO_MONITOR_HTTPS_WAIT_RESULT:-error}" = 'pending' ]; then
+      printf "$(i18n_message '[argo-monitor] 新域名重建等待超时（15 秒，始终未收到 HTTP 响应），订阅未更新：%s\n' '[argo-monitor] candidate rebuild timed out (15s without HTTP response); subscriptions unchanged: %s\n')" "$CANDIDATE"
+    else
+      printf "$(i18n_message '[argo-monitor] 警告：新域名在 15 秒内未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain did not pass HTTP health check within 15s: %s\n')" "$CANDIDATE"
+    fi
     return 1
   fi
   # Reuse manual switching's snapshot/rollback: the domain pointer AND WS conf
