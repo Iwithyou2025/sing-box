@@ -6099,7 +6099,13 @@ argo_toggle_service() {
       cmd_systemctl enable argo || return 1
       sleep 2
       cmd_systemctl status argo >/dev/null 2>&1 || return 1
-      argo_monitor_sync
+      # Fixed Token/JSON tunnels have no Quick Tunnel monitor; never delete
+      # domain/subscription data as a side effect of an ordinary toggle.
+      if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
+        argo_monitor_sync
+      else
+        argo_monitor_pause
+      fi
       ;;
     *) return 2 ;;
   esac
