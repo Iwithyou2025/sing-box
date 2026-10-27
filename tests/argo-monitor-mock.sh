@@ -7,6 +7,8 @@ source <(sed -n \
   -e '/^argo_manual_publish_domain() {/,/^}/p' \
   -e '/^argo_monitor_live_domain() {/,/^}/p' \
   -e '/^argo_monitor_domain_healthy() {/,/^}/p' \
+  -e '/^argo_monitor_http_check() {/,/^}/p' \
+  -e '/^argo_monitor_wait_healthy_domain() {/,/^}/p' \
   -e '/^argo_monitor_wait_domain() {/,/^}/p' \
   -e '/^argo_monitor_publish_domain() {/,/^}/p' \
   -e '/^argo_monitor_code_refresh() {/,/^}/p' \
@@ -27,9 +29,26 @@ ps() { printf '1234 %s/cloudflared tunnel --url http://localhost:8080\n' "$WORK_
 ss() { printf 'LISTEN 0 4096 127.0.0.1:20243 0.0.0.0:* users:(("cloudflared",pid=1234,fd=3))\n'; }
 wget() { printf '{"hostname":"%s"}\n' "$(cat "$WORK_DIR/live")"; }
 curl() {
-  local URL="${!#}" BAD
+  local URL="${!#}" BAD CODE OUT='' BODY=''
   BAD=$(cat "$WORK_DIR/bad_http" 2>/dev/null || true)
-  if [[ "$URL" == *"$BAD"* && -n "$BAD" ]]; then printf 503; else printf 200; fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o|--output) OUT=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ "$URL" == *"$BAD"* && -n "$BAD" ]]; then
+    CODE=503; BODY='<html><h1>nginx upstream error</h1></html>'
+  else
+    CODE=200; BODY='<html><h1>Welcome to nginx!</h1></html>'
+  fi
+  [ -z "$OUT" ] || printf '%s\n' "$BODY" > "$OUT"
+  printf '%s' "$CODE"
+}
+# Keep mock failures fast; production code still defaults to 200 seconds.
+eval "$(declare -f argo_monitor_wait_healthy_domain | sed '1 s/argo_monitor_wait_healthy_domain/argo_monitor_wait_healthy_domain_real/')"
+argo_monitor_wait_healthy_domain() {
+  argo_monitor_wait_healthy_domain_real "$1" 40
 }
 systemctl() { return 0; }
 cmd_systemctl() {
@@ -102,7 +121,7 @@ new_case
 echo old-value.trycloudflare.com > "$WORK_DIR/bad_http"
 echo old-value.trycloudflare.com > "$WORK_DIR/recovery_domain"
 run_monitor
-grep -q 'new domain not HTTP-healthy' "$WORK_DIR/output.log"
+grep -q 'new domain did not pass HTTP health check within 200s' "$WORK_DIR/output.log"
 assert_count "$WORK_DIR/restarts" 1
 assert_count "$WORK_DIR/exports" 0
 test "$(cat "$WORK_DIR/argo-domain")" = old-value.trycloudflare.com
