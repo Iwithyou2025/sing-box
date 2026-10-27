@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the existing-unit repair path without touching system services.
 set -euo pipefail
+set -x
 trap 'rc=$?; printf "FAIL: argo-monitor-service-mock at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
 cd "$(dirname "$0")/.."
 WORK_DIR=$(mktemp -d)
