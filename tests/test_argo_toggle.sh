@@ -137,7 +137,7 @@ printf 'ExecStart=/tmp/cloudflared tunnel run --token abc\n' > "$ARGO_DAEMON_FIL
 reset_actions
 argo_toggle_service enable
 ! grep -q monitor-start "$ROOT/actions"
-grep -qx 'monitor-remove' "$ROOT/actions"
+! grep -q 'monitor-remove' "$ROOT/actions"
 assert_kept
 
 echo '[7/7] OpenRC: stop/start exact Quick Tunnel monitor'
