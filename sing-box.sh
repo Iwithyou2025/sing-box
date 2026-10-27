@@ -5960,6 +5960,22 @@ fetch_quicktunnel_domain() {
 }
 
 
+# Pause monitoring without deleting Quick Tunnel domains, subscriptions, or recovery counters.
+# Keep monitoring as an independent unit: the monitor itself may restart Argo on failure.
+argo_monitor_pause() {
+  local FILE
+  [ "$SYSTEM" = 'Alpine' ] && FILE='/etc/init.d/argo-monitor' || FILE='/etc/systemd/system/argo-monitor.service'
+  [ -s "$FILE" ] || return 0
+  if [ "$SYSTEM" = 'Alpine' ]; then
+    if ! rc-service argo-monitor stop >/dev/null 2>&1; then
+      rc-service argo-monitor status >/dev/null 2>&1 && return 1
+    fi
+    rc-update del argo-monitor default >/dev/null 2>&1 || return 1
+  else
+    systemctl disable --now argo-monitor.service >/dev/null 2>&1 || return 1
+  fi
+}
+
 # 自动监控仅管理 Quick Tunnel；固定 Argo 隧道不受影响。
 argo_monitor_remove() {
   local FILE
@@ -5981,6 +5997,21 @@ argo_monitor_sync() {
   if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
     # Use the project-owned wrapper explicitly; /usr/bin/sb may belong to an unrelated package.
     [ -x "${WORK_DIR}/sb.sh" ] || return 0
+    # Respect user-disabled Argo. Other sync paths must not revive its monitor.
+    # Do not encode this as a systemd dependency: the monitor restarts Argo itself.
+    if [ "$SYSTEM" = 'Alpine' ]; then
+      if ! rc-update show default 2>/dev/null | awk '$1=="argo" {found=1} END {exit !found}' ||
+         ! rc-service argo status >/dev/null 2>&1; then
+        argo_monitor_pause
+        return $?
+      fi
+    else
+      if ! systemctl is-enabled --quiet argo.service ||
+         ! systemctl is-active --quiet argo.service; then
+        argo_monitor_pause
+        return $?
+      fi
+    fi
     if [ -s "$FILE" ]; then
       if [ "$SYSTEM" = 'Alpine' ]; then
         if grep -q '^command="/usr/bin/sb"$' "$FILE"; then
@@ -6054,6 +6085,31 @@ EOF
   fi
 }
 
+
+# Shared entry for menu item 3 and `sb -a`: stop monitoring before stopping
+# the tunnel; on enable, only restore Quick Tunnel monitoring after Argo is up.
+argo_toggle_service() {
+  case "$1" in
+    disable)
+      argo_monitor_pause || return 1
+      cmd_systemctl disable argo || return 1
+      ! cmd_systemctl status argo >/dev/null 2>&1
+      ;;
+    enable)
+      cmd_systemctl enable argo || return 1
+      sleep 2
+      cmd_systemctl status argo >/dev/null 2>&1 || return 1
+      # Fixed Token/JSON tunnels have no Quick Tunnel monitor; never delete
+      # domain/subscription data as a side effect of an ordinary toggle.
+      if [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE"; then
+        argo_monitor_sync
+      else
+        argo_monitor_pause
+      fi
+      ;;
+    *) return 2 ;;
+  esac
+}
 
 # 只读当前 cloudflared 实际使用的临时域名；不启动或修改隧道。
 argo_monitor_live_domain() {
@@ -6256,7 +6312,7 @@ argo_monitor_loop() {
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
     # 尊重用户主动禁用 Argo 的操作。
     if [ "$SYSTEM" = 'Alpine' ]; then
-      rc-update show default 2>/dev/null | grep -qw argo || { FAILURES=0; continue; }
+      rc-update show default 2>/dev/null | awk '$1=="argo" {found=1} END {exit !found}' || { FAILURES=0; continue; }
     else
       systemctl is-enabled --quiet argo.service || { FAILURES=0; continue; }
     fi
@@ -7939,13 +7995,10 @@ menu_setting() {
 
     [ "${STATUS[1]}" = "$(text 28)" ] &&
     ACTION[3]() {
-      cmd_systemctl disable argo
-      cmd_systemctl status argo &>/dev/null && error "\n Argo $(text 27) $(text 38) \n" || info "\n Argo $(text 27) $(text 37) \n"
+      argo_toggle_service disable && info "\n Argo $(text 27) $(text 37) \n" || error "\n Argo $(text 27) $(text 38) \n"
     } ||
     ACTION[3]() {
-      cmd_systemctl enable argo
-      sleep 2
-      cmd_systemctl status argo &>/dev/null &&  info "\n Argo $(text 28) $(text 37) \n" || error "\n Argo $(text 28) $(text 38) \n"
+      argo_toggle_service enable && info "\n Argo $(text 28) $(text 37) \n" || error "\n Argo $(text 28) $(text 38) \n"
       grep -qs '\--url' ${ARGO_DAEMON_FILE} && fetch_quicktunnel_domain && export_list
     }
 
@@ -8175,12 +8228,9 @@ for z in ${!ALL_PARAMETER[@]}; do
       if [ "${STATUS[1]}" = "$(text 26)" ]; then
         error "\n Argo $(text 26) "
       elif [ "${STATUS[1]}" = "$(text 28)" ]; then
-        cmd_systemctl disable argo
-        cmd_systemctl status argo &>/dev/null && error "\n Argo $(text 27) $(text 38) \n" || info "\n Argo $(text 27) $(text 37) \n"
+        argo_toggle_service disable && info "\n Argo $(text 27) $(text 37) \n" || error "\n Argo $(text 27) $(text 38) \n"
       elif [ "${STATUS[1]}" = "$(text 27)" ]; then
-        cmd_systemctl enable argo
-        sleep 2
-        cmd_systemctl status argo &>/dev/null && info "\n Argo $(text 28) $(text 37) \n" || error "\n Argo $(text 28) $(text 38) \n"
+        argo_toggle_service enable && info "\n Argo $(text 28) $(text 37) \n" || error "\n Argo $(text 28) $(text 38) \n"
         grep -qs '\--url' ${ARGO_DAEMON_FILE} && fetch_quicktunnel_domain && export_list
       fi
       exit 0

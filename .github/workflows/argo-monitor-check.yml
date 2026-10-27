@@ -8,6 +8,7 @@ on:
       - 'tests/argo-monitor-mock.sh'
       - 'tests/test-argo-monitor-health.sh'
       - 'tests/argo-monitor-service-mock.sh'
+      - 'tests/test_argo_toggle.sh'
       - 'tests/test_warp_account_parser.sh'
       - 'tests/test_node_name_flag.sh'
       - 'tests/test_nginx_ws_read_timeout.sh'
@@ -35,12 +36,15 @@ jobs:
       - name: Mock live hostname change
         shell: bash
         run: bash tests/argo-monitor-mock.sh
-      - name: Verify HTTPS body and nginx keyword health checks
-        shell: bash
-        run: bash tests/test-argo-monitor-health.sh
       - name: Mock repair of already installed monitor service
         shell: bash
         run: bash tests/argo-monitor-service-mock.sh
+      - name: Verify HTTPS body and nginx keyword health checks
+        shell: bash
+        run: bash tests/test-argo-monitor-health.sh
+      - name: Argo user toggle and monitor lifecycle regression
+        shell: bash
+        run: bash tests/test_argo_toggle.sh
       - name: WARP reserved parser and install fallback regression
         shell: bash
         run: |
