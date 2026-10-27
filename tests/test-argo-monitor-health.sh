@@ -4,7 +4,7 @@ set -Eeuo pipefail
 TEST_CASE='preflight'
 trap 'rc=$?; printf "FAIL: %s (line %s, exit %s)\n" "$TEST_CASE" "$LINENO" "$rc" >&2' ERR
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-printf "Argo monitor HTTPS retry tests (15s total / 500ms interval)\n"
+printf "Argo monitor HTTPS retry tests (200s total / 500ms interval)\n"
 printf "Script: %s\n" "$ROOT/sing-box.sh"
 [ -s "$ROOT/sing-box.sh" ] || { echo "FAIL: missing sing-box.sh (download both files from main)" >&2; exit 1; }
 TMP=$(mktemp -d)
@@ -12,6 +12,8 @@ trap 'rm -rf "$TMP"' EXIT
 awk '/^argo_monitor_wait_healthy_domain\(\) \{/{p=1} p{print} p && /^\}$/{exit}' "$ROOT/sing-box.sh" > "$TMP/function.sh"
 grep -q '^argo_monitor_wait_healthy_domain() {' "$TMP/function.sh" || { echo 'FAIL: retry function missing; sing-box.sh is old or download cache is stale' >&2; exit 1; }
 bash -n "$TMP/function.sh"
+# Validate the production default without waiting 200 seconds in a mock test.
+grep -Fq 'WAIT_MS="${2:-200000}"' "$TMP/function.sh" || { echo "FAIL: expected 200s production HTTPS deadline" >&2; exit 1; }
 source "$TMP/function.sh"
 cat > "$TMP/curl" <<'MOCK'
 #!/usr/bin/env bash
