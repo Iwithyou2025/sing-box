@@ -22,6 +22,7 @@ source "$TMP/domain-function.sh"
 # Validate the production default without waiting 200 seconds in a mock test.
 grep -Fq 'WAIT_MS="${2:-200000}"' "$TMP/function.sh" || { echo "FAIL: expected 200s production HTTPS deadline" >&2; exit 1; }
 grep -Fq 'SLEEP_US=3000000' "$TMP/function.sh" || { echo "FAIL: expected 3-second retry interval" >&2; exit 1; }
+grep -Fq "printf -v SLEEP_SEC '%d.%06d'" "$TMP/function.sh" || { echo "FAIL: retry sleep must format whole seconds correctly" >&2; exit 1; }
 source "$TMP/function.sh"
 cat > "$TMP/curl" <<'MOCK'
 #!/usr/bin/env bash
