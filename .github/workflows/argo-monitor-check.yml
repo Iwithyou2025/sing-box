@@ -6,6 +6,7 @@ on:
       - 'sing-box.sh'
       - '.github/workflows/argo-monitor-check.yml'
       - 'tests/argo-monitor-mock.sh'
+      - 'tests/test-argo-monitor-health.sh'
       - 'tests/argo-monitor-service-mock.sh'
       - 'tests/test_warp_account_parser.sh'
       - 'tests/test_node_name_flag.sh'
@@ -34,6 +35,9 @@ jobs:
       - name: Mock live hostname change
         shell: bash
         run: bash tests/argo-monitor-mock.sh
+      - name: Verify HTTPS body and nginx keyword health checks
+        shell: bash
+        run: bash tests/test-argo-monitor-health.sh
       - name: Mock repair of already installed monitor service
         shell: bash
         run: bash tests/argo-monitor-service-mock.sh

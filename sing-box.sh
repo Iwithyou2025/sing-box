@@ -6068,18 +6068,44 @@ argo_monitor_live_domain() {
   printf '%s\n' "$HOST"
 }
 
-# 探测现有 nginx 主页对应的 HTTPS 2xx；不把 DNS 可解析当作隧道健康。
-argo_monitor_domain_healthy() {
-  local DOMAIN=$1 CODE=''
+# Verify the public nginx homepage by reading the actual HTTPS response body.
+# Print the body to the monitor log; require HTTP 200 AND the word "nginx".
+# Use one shared rule for the running domain and candidate tunnel domain.
+argo_monitor_http_check() {
+  local DOMAIN="$1" LIMIT="${2:-8}" BODY_FILE
+  ARGO_MONITOR_HTTP_CODE='000'
+  ARGO_MONITOR_HTTP_EXIT=0
+  ARGO_MONITOR_HTTP_NGINX=0
   [[ "$DOMAIN" =~ ^[a-zA-Z0-9-]+[.]trycloudflare[.]com$ ]] || return 1
-  if command -v curl >/dev/null 2>&1; then
-    CODE=$(curl -sS -L --connect-timeout 3 --max-time 8 -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || return 1
-    [[ "$CODE" =~ ^2[0-9][0-9]$ ]]
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --spider --timeout=8 --tries=1 "https://$DOMAIN/" >/dev/null 2>&1
-  else
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "$(i18n_message '[argo-monitor] 警告：缺少 curl，无法验证 HTTPS 响应正文' '[argo-monitor] WARNING: curl is required to inspect the HTTPS response body')"
     return 1
   fi
+  BODY_FILE=$(mktemp /tmp/argo-monitor-body.XXXXXXXX) || return 1
+  ARGO_MONITOR_HTTP_CODE=$(curl -sS -L --connect-timeout 3 --max-time "$LIMIT" \
+    -o "$BODY_FILE" -w '%{http_code}' "https://$DOMAIN/") || ARGO_MONITOR_HTTP_EXIT=$?
+  [ -n "$ARGO_MONITOR_HTTP_CODE" ] || ARGO_MONITOR_HTTP_CODE='000'
+
+  printf "$(i18n_message '[argo-monitor] HTTPS 响应正文（%s）：\n' '[argo-monitor] HTTPS response body (%s):\n')" "$DOMAIN"
+  if [ -s "$BODY_FILE" ]; then
+    cat "$BODY_FILE"
+    printf '\n'
+    if grep -qi 'nginx' "$BODY_FILE"; then
+      ARGO_MONITOR_HTTP_NGINX=1
+    fi
+  else
+    printf '%s\n' "$(i18n_message '（空响应）' '(empty response)')"
+  fi
+  rm -f -- "$BODY_FILE"
+
+  [ "$ARGO_MONITOR_HTTP_EXIT" -eq 0 ] &&
+    [ "$ARGO_MONITOR_HTTP_CODE" = '200' ] &&
+    [ "$ARGO_MONITOR_HTTP_NGINX" -eq 1 ]
+}
+
+# Existing hostname: keep the same 54s polling and 2-failure rebuild policy.
+argo_monitor_domain_healthy() {
+  argo_monitor_http_check "$1" 8
 }
 
 # Retry a newly allocated Quick Tunnel hostname until HTTPS is ready.
@@ -6110,37 +6136,21 @@ argo_monitor_wait_healthy_domain() {
     REMAIN_MS=$(((REMAIN_US + 999) / 1000))
     ATTEMPT=$((ATTEMPT + 1))
 
-    if command -v curl >/dev/null 2>&1; then
-      printf -v MAX_TIME '%d.%03d' "$((REMAIN_MS / 1000))" "$((REMAIN_MS % 1000))"
-      EXIT_CODE=0
-      HTTP_CODE=$(curl -sS -L --connect-timeout 3 --max-time "$MAX_TIME" -o /dev/null -w '%{http_code}' "https://$DOMAIN/" 2>/dev/null) || EXIT_CODE=$?
-      if [ "$EXIT_CODE" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
-        ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'
-        return 0
-      fi
-      if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = '000' ]; then
-        # curl 000 indicates NO HTTP status was received, not an HTTP error.
-        printf "$(i18n_message '[argo-monitor] 新域名重建中（第 %s 次）：%s；尚无 HTTP 响应（HTTP=000）；curl退出码=%s\n' '[argo-monitor] candidate tunnel is rebuilding (attempt %s): %s; no HTTP response (HTTP=000); curl_exit=%s\n')" \
-          "$ATTEMPT" "$DOMAIN" "$EXIT_CODE"
-      else
-        ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
-        printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；HTTP=%s；curl退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; HTTP=%s; curl_exit=%s\n')" \
-          "$ATTEMPT" "$DOMAIN" "$HTTP_CODE" "$EXIT_CODE"
-      fi
-    elif command -v wget >/dev/null 2>&1; then
-      # Fallback for hosts without curl. wget only reports its exit status.
-      if wget -q --spider --timeout="$(((REMAIN_MS + 999) / 1000))" --tries=1 "https://$DOMAIN/" >/dev/null 2>&1; then
-        ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'
-        return 0
-      else
-        EXIT_CODE=$?
-      fi
-      ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
-      printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；wget退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; wget_exit=%s\n')" \
+    printf -v MAX_TIME '%d.%03d' "$((REMAIN_MS / 1000))" "$((REMAIN_MS % 1000))"
+    if argo_monitor_http_check "$DOMAIN" "$MAX_TIME"; then
+      ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'
+      return 0
+    fi
+    HTTP_CODE=$ARGO_MONITOR_HTTP_CODE
+    EXIT_CODE=$ARGO_MONITOR_HTTP_EXIT
+    if [ "$HTTP_CODE" = '000' ]; then
+      # No response was received. Keep waiting; it is not an HTTP 504 error.
+      printf "$(i18n_message '[argo-monitor] 新域名重建中（第 %s 次）：%s；尚无 HTTP 响应（HTTP=000）；curl退出码=%s\n' '[argo-monitor] candidate tunnel is rebuilding (attempt %s): %s; no HTTP response (HTTP=000); curl_exit=%s\n')" \
         "$ATTEMPT" "$DOMAIN" "$EXIT_CODE"
     else
-      echo "$(i18n_message '[argo-monitor] 警告：缺少 curl/wget，无法验证新域名 HTTPS' '[argo-monitor] WARNING: curl/wget missing; cannot verify candidate HTTPS')"
-      return 1
+      ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
+      printf "$(i18n_message '[argo-monitor] 新域名 HTTPS 检查失败（第 %s 次）：%s；HTTP=%s；nginx=%s；curl退出码=%s\n' '[argo-monitor] candidate HTTPS check failed (attempt %s): %s; HTTP=%s; nginx=%s; curl_exit=%s\n')" \
+        "$ATTEMPT" "$DOMAIN" "$HTTP_CODE" "$ARGO_MONITOR_HTTP_NGINX" "$EXIT_CODE"
     fi
 
     if [ -n "${EPOCHREALTIME:-}" ]; then
@@ -6174,7 +6184,7 @@ argo_monitor_wait_domain() {
   return 1
 }
 
-# 新域名必须通过公网 HTTPS 的 HTTP 2xx 检查，才调用现有配置/订阅更新函数。
+# 新域名必须通过公网 HTTPS 的 HTTP 200 且正文包含 nginx，才调用现有配置/订阅更新函数。
 argo_monitor_publish_domain() {
   local CANDIDATE=$1 PREVIOUS=$2
   if [ -d "$WORK_DIR/.argo-change.lock" ] && [ "${ARGO_CHANGE_ALLOW_PUBLISH:-0}" != 1 ]; then
