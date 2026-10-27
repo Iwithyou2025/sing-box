@@ -6,6 +6,7 @@ on:
       - 'sing-box.sh'
       - '.github/workflows/argo-monitor-check.yml'
       - 'tests/argo-monitor-mock.sh'
+      - 'tests/test_argo_monitor_toggle.sh'
       - 'tests/test-argo-monitor-health.sh'
       - 'tests/argo-monitor-service-mock.sh'
       - 'tests/test_warp_account_parser.sh'
@@ -32,6 +33,9 @@ jobs:
           grep -q '^argo_monitor_loop() {' sing-box.sh
           grep -q '^argo_monitor_sync() {' sing-box.sh
           grep -q '^argo_monitor_remove() {' sing-box.sh
+      - name: Argo and monitor toggle linkage
+        shell: bash
+        run: bash tests/test_argo_monitor_toggle.sh
       - name: Mock live hostname change
         shell: bash
         run: bash tests/argo-monitor-mock.sh
