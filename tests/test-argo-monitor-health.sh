@@ -69,7 +69,7 @@ TEST_CASE='1/15 immediate HTTP 200'
 printf '[1/15] Immediate 200... '
 MOCK_MODE=immediate; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_wait_healthy_domain sample.trycloudflare.com 1000 > "$TMP/log"
-grep -q 'Welcome to nginx!' "$TMP/log"
+! grep -q 'Welcome to nginx!' "$TMP/log"
 [[ $(cat "$MOCK_COUNT") == 1 ]]
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == healthy ]]
 echo "PASS immediate 200"
@@ -80,7 +80,7 @@ MOCK_MODE=transient; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_wait_healthy_domain sample.trycloudflare.com 2200 > "$TMP/log"
 [[ $(cat "$MOCK_COUNT") == 3 ]]
 grep -q '重建中.*HTTP=000.*curl退出码=6' "$TMP/log"
-grep -q 'Welcome to nginx!' "$TMP/log"
+! grep -q 'Welcome to nginx!' "$TMP/log"
 ! grep -q '检查失败.*HTTP=000' "$TMP/log"
 grep -q '检查失败.*HTTP=530.*curl退出码=0' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == healthy ]]
@@ -176,6 +176,7 @@ MOCK_MODE=missing; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_http_check sample.trycloudflare.com 1 > "$TMP/log"; then exit 1; fi
 [[ "$ARGO_MONITOR_HTTP_CODE" == 200 && "$ARGO_MONITOR_HTTP_NGINX" == 0 ]]
 grep -q 'Other site' "$TMP/log"
+grep -q 'HTTPS 响应正文' "$TMP/log"
 echo "PASS HTTP 200 alone does not prove healthy"
 
 TEST_CASE='12/15 HTTP 204 with nginx keyword'
@@ -183,6 +184,7 @@ printf '[12/15] HTTP 204 with nginx keyword... '
 MOCK_MODE=other2xx; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_http_check sample.trycloudflare.com 1 > "$TMP/log"; then exit 1; fi
 [[ "$ARGO_MONITOR_HTTP_CODE" == 204 && "$ARGO_MONITOR_HTTP_NGINX" == 1 ]]
+! grep -q 'Welcome to nginx!' "$TMP/log"
 echo "PASS HTTP 204 is not HTTP 200"
 
 TEST_CASE='13/15 HTTP 504 with nginx keyword'
@@ -190,7 +192,7 @@ printf '[13/15] HTTP 504 with nginx keyword... '
 MOCK_MODE=nginx504; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_http_check sample.trycloudflare.com 1 > "$TMP/log"; then exit 1; fi
 [[ "$ARGO_MONITOR_HTTP_CODE" == 504 && "$ARGO_MONITOR_HTTP_NGINX" == 1 ]]
-grep -q 'nginx is reporting an error' "$TMP/log"
+! grep -q 'nginx is reporting an error' "$TMP/log"
 echo "PASS HTTP 504 rejected despite nginx keyword"
 
 TEST_CASE='14/15 case-insensitive nginx keyword'
@@ -198,6 +200,7 @@ printf '[14/15] Uppercase NGINX keyword... '
 MOCK_MODE=upper; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_http_check sample.trycloudflare.com 1 > "$TMP/log"
 [[ "$ARGO_MONITOR_HTTP_CODE" == 200 && "$ARGO_MONITOR_HTTP_NGINX" == 1 ]]
+! grep -q 'WELCOME TO NGINX!' "$TMP/log"
 echo "PASS uppercase NGINX accepted with HTTP 200"
 
 TEST_CASE='15/15 existing-domain uses same body verification'
@@ -207,7 +210,7 @@ if argo_monitor_domain_healthy sample.trycloudflare.com > "$TMP/log"; then exit 
 [[ "$ARGO_MONITOR_HTTP_NGINX" == 0 ]]
 MOCK_MODE=immediate; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_domain_healthy sample.trycloudflare.com > "$TMP/log"
-grep -q 'Welcome to nginx!' "$TMP/log"
+! grep -q 'Welcome to nginx!' "$TMP/log"
 echo "PASS running domain requires HTTP 200 and nginx"
 
 echo "RESULT: 15/15 PASS. Tests are mocked; no live Argo restart."
