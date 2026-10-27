@@ -6111,7 +6111,7 @@ argo_monitor_domain_healthy() {
 }
 
 # Retry a newly allocated Quick Tunnel hostname until HTTPS is ready.
-# The 200s deadline includes all curl attempts and sleeps; retry every 500ms.
+# The 200s deadline includes all curl attempts and sleeps; retry every 3s.
 argo_monitor_wait_healthy_domain() {
   local DOMAIN="$1" WAIT_MS="${2:-200000}" NOW_US DEADLINE_US REMAIN_US REMAIN_MS
   local HTTP_CODE='' EXIT_CODE=0 ATTEMPT=0 MAX_TIME SLEEP_US SLEEP_SEC
@@ -6162,9 +6162,9 @@ argo_monitor_wait_healthy_domain() {
     fi
     REMAIN_US=$((DEADLINE_US - NOW_US))
     [ "$REMAIN_US" -gt 0 ] || break
-    SLEEP_US=500000
+    SLEEP_US=3000000
     [ "$REMAIN_US" -lt "$SLEEP_US" ] && SLEEP_US=$REMAIN_US
-    printf -v SLEEP_SEC '0.%06d' "$SLEEP_US"
+    printf -v SLEEP_SEC '%d.%06d' "$((SLEEP_US / 1000000))" "$((SLEEP_US % 1000000))"
     sleep "$SLEEP_SEC"
   done
   return 1
