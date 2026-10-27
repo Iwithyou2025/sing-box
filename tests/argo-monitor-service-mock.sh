@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the existing-unit repair path without touching system services.
 set -euo pipefail
-set -x
 trap 'rc=$?; printf "FAIL: argo-monitor-service-mock at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
 cd "$(dirname "$0")/.."
 WORK_DIR=$(mktemp -d)
@@ -53,11 +52,14 @@ rc-update() {
       [ ! -e "$WORK_DIR/enabled" ] || printf 'argo-monitor | default\n'
       ;;
     'add argo-monitor default') printf 'rc-add\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/enabled" ;;
+    'del argo-monitor default') printf 'rc-del\n' >> "$WORK_DIR/commands"; rm -f "$WORK_DIR/enabled" ;;
     *) printf 'Unexpected rc-update: %s\n' "$*" >&2; return 99 ;;
   esac
 }
 rc-service() {
   case "$*" in
+    'argo status') test -e "$WORK_DIR/argo-active" ;;
+    'argo-monitor stop') printf 'rc-stop\n' >> "$WORK_DIR/commands"; rm -f "$WORK_DIR/active" ;;
     'argo-monitor status') test -e "$WORK_DIR/active" ;;
     'argo-monitor start') printf 'rc-start\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/active" ;;
     'argo-monitor restart') printf 'rc-restart\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/active" ;;
