@@ -6000,7 +6000,7 @@ argo_monitor_sync() {
     # Respect user-disabled Argo. Other sync paths must not revive its monitor.
     # Do not encode this as a systemd dependency: the monitor restarts Argo itself.
     if [ "$SYSTEM" = 'Alpine' ]; then
-      if ! rc-update show default 2>/dev/null | grep -qw argo ||
+      if ! rc-update show default 2>/dev/null | awk '$1=="argo" {found=1} END {exit !found}' ||
          ! rc-service argo status >/dev/null 2>&1; then
         argo_monitor_pause
         return $?
@@ -6306,7 +6306,7 @@ argo_monitor_loop() {
     [ -s "$ARGO_DAEMON_FILE" ] && grep -q -- '--url' "$ARGO_DAEMON_FILE" || { FAILURES=0; continue; }
     # 尊重用户主动禁用 Argo 的操作。
     if [ "$SYSTEM" = 'Alpine' ]; then
-      rc-update show default 2>/dev/null | grep -qw argo || { FAILURES=0; continue; }
+      rc-update show default 2>/dev/null | awk '$1=="argo" {found=1} END {exit !found}' || { FAILURES=0; continue; }
     else
       systemctl is-enabled --quiet argo.service || { FAILURES=0; continue; }
     fi
