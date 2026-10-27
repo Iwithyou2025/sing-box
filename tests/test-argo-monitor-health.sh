@@ -37,16 +37,16 @@ chmod +x "$TMP/curl"
 export MOCK_COUNT="$TMP/count" MOCK_MODE='' PATH="$TMP:$PATH"
 i18n_message() { printf '%s' "$1"; }
 
-TEST_CASE='1/7 immediate HTTP 200'
-printf '[1/7] Immediate 200... '
+TEST_CASE='1/10 immediate HTTP 200'
+printf '[1/10] Immediate 200... '
 MOCK_MODE=immediate; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_wait_healthy_domain sample.trycloudflare.com 1000
 [[ $(cat "$MOCK_COUNT") == 1 ]]
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == healthy ]]
 echo "PASS immediate 200"
 
-TEST_CASE='2/7 DNS/530 recovery'
-printf '[2/7] DNS error -> HTTP 530 -> 200... '
+TEST_CASE='2/10 DNS/530 recovery'
+printf '[2/10] DNS error -> HTTP 530 -> 200... '
 MOCK_MODE=transient; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_wait_healthy_domain sample.trycloudflare.com 2200 > "$TMP/log"
 [[ $(cat "$MOCK_COUNT") == 3 ]]
@@ -56,8 +56,8 @@ grep -q '检查失败.*HTTP=530.*curl退出码=0' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == healthy ]]
 echo "PASS HTTP 000 is rebuilding, 530 failed, then 200 recovered"
 
-TEST_CASE='3/7 repeated failures and deadline'
-printf '[3/7] Repeated HTTP 530 until deadline... '
+TEST_CASE='3/10 repeated failures and deadline'
+printf '[3/10] Repeated HTTP 530 until deadline... '
 MOCK_MODE=failed; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_wait_healthy_domain sample.trycloudflare.com 1300 > "$TMP/log"; then exit 1; fi
 n=$(cat "$MOCK_COUNT")
@@ -66,16 +66,16 @@ grep -q '检查失败.*HTTP=530.*curl退出码=0' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == error ]]
 echo "PASS HTTP 530 remains a failure until deadline"
 
-TEST_CASE='4/7 invalid domain'
-printf '[4/7] Invalid hostname... '
+TEST_CASE='4/10 invalid domain'
+printf '[4/10] Invalid hostname... '
 echo 0 > "$MOCK_COUNT"
 if argo_monitor_wait_healthy_domain example.org 1000; then exit 1; fi
 [[ $(cat "$MOCK_COUNT") == 0 ]]
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == error ]]
 echo "PASS rejects invalid domain"
 
-TEST_CASE='5/7 only HTTP 000 until deadline'
-printf '[5/7] Repeated HTTP 000 while rebuilding... '
+TEST_CASE='5/10 only HTTP 000 until deadline'
+printf '[5/10] Repeated HTTP 000 while rebuilding... '
 MOCK_MODE=pending; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_wait_healthy_domain sample.trycloudflare.com 1300 > "$TMP/log"; then exit 1; fi
 n=$(cat "$MOCK_COUNT")
@@ -85,8 +85,8 @@ grep -q '重建中.*HTTP=000.*curl退出码=6' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == pending ]]
 echo "PASS only 000 stays pending until deadline"
 
-TEST_CASE='6/7 HTTP 504 failure then 200 recovery'
-printf '[6/7] HTTP 504 -> 200... '
+TEST_CASE='6/10 HTTP 504 failure then 200 recovery'
+printf '[6/10] HTTP 504 -> 200... '
 MOCK_MODE=gateway; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 argo_monitor_wait_healthy_domain sample.trycloudflare.com 1500 > "$TMP/log"
 [[ $(cat "$MOCK_COUNT") == 2 ]]
@@ -94,12 +94,50 @@ grep -q '检查失败.*HTTP=504.*curl退出码=0' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == healthy ]]
 echo "PASS 504 is an HTTPS check failure; later 200 recovers"
 
-TEST_CASE='7/7 empty response without status'
-printf '[7/7] Empty HTTP response... '
+TEST_CASE='7/10 empty response without status'
+printf '[7/10] Empty HTTP response... '
 MOCK_MODE=empty; export MOCK_MODE; echo 0 > "$MOCK_COUNT"
 if argo_monitor_wait_healthy_domain sample.trycloudflare.com 1100 > "$TMP/log"; then exit 1; fi
 grep -q '重建中.*HTTP=000.*curl退出码=7' "$TMP/log"
 [[ "$ARGO_MONITOR_HTTPS_WAIT_RESULT" == pending ]]
 echo "PASS empty response treated as rebuilding"
 
-echo "RESULT: 7/7 PASS. Tests are mocked; no live Argo restart."
+# Publisher tests: replace real publication and health checking with mocks.
+awk '/^argo_monitor_publish_domain\(\) \{/{p=1} p{print} p && /^\}$/{exit}' "$ROOT/sing-box.sh" > "$TMP/publish-function.sh"
+grep -q '^argo_monitor_publish_domain() {' "$TMP/publish-function.sh"
+bash -n "$TMP/publish-function.sh"
+source "$TMP/publish-function.sh"
+WORK_DIR="$TMP/work"
+mkdir -p "$WORK_DIR"
+argo_manual_publish_domain() {
+  echo "$1" > "$WORK_DIR/argo-domain"
+  touch "$WORK_DIR/published"
+  return 0
+}
+
+TEST_CASE='8/10 000 timeout must not publish'
+printf '[8/10] HTTP 000 timeout: subscriptions unchanged... '
+argo_monitor_wait_healthy_domain() { ARGO_MONITOR_HTTPS_WAIT_RESULT='pending'; return 1; }
+if argo_monitor_publish_domain sample.trycloudflare.com old.trycloudflare.com > "$TMP/log"; then exit 1; fi
+grep -q '重建等待超时' "$TMP/log"
+[[ ! -e "$WORK_DIR/published" ]]
+echo "PASS still rebuilding, no domain/subscription publication"
+
+TEST_CASE='9/10 real HTTP error must not publish'
+printf '[9/10] HTTP error timeout: subscriptions unchanged... '
+argo_monitor_wait_healthy_domain() { ARGO_MONITOR_HTTPS_WAIT_RESULT='error'; return 1; }
+if argo_monitor_publish_domain sample.trycloudflare.com old.trycloudflare.com > "$TMP/log"; then exit 1; fi
+grep -q '未通过 HTTP 健康检查' "$TMP/log"
+[[ ! -e "$WORK_DIR/published" ]]
+echo "PASS HTTPS failed, no domain/subscription publication"
+
+TEST_CASE='10/10 2xx success can publish'
+printf '[10/10] Verified HTTP 200: publish allowed... '
+argo_monitor_wait_healthy_domain() { ARGO_MONITOR_HTTPS_WAIT_RESULT='healthy'; return 0; }
+argo_monitor_publish_domain sample.trycloudflare.com old.trycloudflare.com > "$TMP/log"
+[[ -e "$WORK_DIR/published" ]]
+[[ "$(cat "$WORK_DIR/argo-domain")" == 'sample.trycloudflare.com' ]]
+grep -q 'HTTP 验证通过，订阅已同步' "$TMP/log"
+echo "PASS healthy candidate published"
+
+echo "RESULT: 10/10 PASS. Tests are mocked; no live Argo restart."
