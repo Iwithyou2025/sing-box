@@ -5984,6 +5984,7 @@ argo_monitor_pause() {
 }
 
 # 菜单和 sb -a 共用 Argo 启停路径，防止两处服务状态不一致。
+# 注意：主动关闭仅暂停监控，不清理原有域名和订阅，恢复时复用现有服务。
 argo_toggle_service() {
   local MODE="$1"
   case "$MODE" in
