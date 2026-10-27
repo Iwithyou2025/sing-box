@@ -17,6 +17,7 @@ source "$WORK_DIR/func.sh"
 
 systemctl() {
   case "$*" in
+    'is-enabled --quiet argo.service') test -e "$WORK_DIR/argo_service_enabled" ;;
     'is-enabled --quiet argo-monitor.service') test -e "$WORK_DIR/enabled" ;;
     'is-active --quiet argo-monitor.service') test -e "$WORK_DIR/active" ;;
     'daemon-reload') printf 'daemon-reload\n' >> "$WORK_DIR/commands" ;;
@@ -40,7 +41,10 @@ systemctl() {
 }
 rc-update() {
   case "$*" in
-    'show default') test -e "$WORK_DIR/enabled" && printf 'argo-monitor | default\n' || return 1 ;;
+    'show default')
+      test ! -e "$WORK_DIR/argo_service_enabled" || printf 'argo | default\n'
+      test ! -e "$WORK_DIR/enabled" || printf 'argo-monitor | default\n'
+      ;;
     'add argo-monitor default') printf 'rc-add\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/enabled" ;;
     *) printf 'Unexpected rc-update: %s\n' "$*" >&2; return 99 ;;
   esac
@@ -69,6 +73,8 @@ count_commands() {
 }
 
 SYSTEM=Ubuntu
+: > "$WORK_DIR/argo_service_enabled"
+argo_monitor_pause() { printf 'paused\n' >> "$WORK_DIR/commands"; }
 printf '[Unit]\n' > "$WORK_DIR/argo-monitor.service"
 
 # Fully active & enabled: avoid needless service restart.
@@ -152,6 +158,18 @@ test -e "$WORK_DIR/enabled" && test -e "$WORK_DIR/active"
 rm -f "$WORK_DIR/commands"
 argo_monitor_sync
 count_commands 0
+
+# An explicitly disabled Argo must keep its monitor paused across exports.
+SYSTEM=Ubuntu
+printf 'ExecStart=/tmp/cloudflared tunnel --url http://localhost:8080\n' > "$ARGO_DAEMON_FILE"
+printf '[Unit]\n' > "$WORK_DIR/argo-monitor.service"
+reset_case
+rm -f "$WORK_DIR/argo_service_enabled"
+argo_monitor_sync
+count_commands 1
+grep -qx paused "$WORK_DIR/commands"
+test -e "$WORK_DIR/argo-monitor.service"
+: > "$WORK_DIR/argo_service_enabled"
 
 # Fixed tunnel: monitor is removed instead of being enabled.
 SYSTEM=Ubuntu
