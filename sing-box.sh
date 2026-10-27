@@ -6069,7 +6069,7 @@ argo_monitor_live_domain() {
 }
 
 # Verify the public nginx homepage by reading the actual HTTPS response body.
-# Print the body to the monitor log; require HTTP 200 AND the word "nginx".
+# Only print response bodies WITHOUT "nginx"; require HTTP 200 AND the keyword.
 # Use one shared rule for the running domain and candidate tunnel domain.
 argo_monitor_http_check() {
   local DOMAIN="$1" LIMIT="${2:-8}" BODY_FILE
@@ -6086,14 +6086,16 @@ argo_monitor_http_check() {
     -o "$BODY_FILE" -w '%{http_code}' "https://$DOMAIN/") || ARGO_MONITOR_HTTP_EXIT=$?
   [ -n "$ARGO_MONITOR_HTTP_CODE" ] || ARGO_MONITOR_HTTP_CODE='000'
 
-  printf "$(i18n_message '[argo-monitor] HTTPS 响应正文（%s）：\n' '[argo-monitor] HTTPS response body (%s):\n')" "$DOMAIN"
   if [ -s "$BODY_FILE" ]; then
-    cat "$BODY_FILE"
-    printf '\n'
     if grep -qi 'nginx' "$BODY_FILE"; then
       ARGO_MONITOR_HTTP_NGINX=1
+    else
+      printf "$(i18n_message '[argo-monitor] HTTPS 响应正文（%s）：\n' '[argo-monitor] HTTPS response body (%s):\n')" "$DOMAIN"
+      cat "$BODY_FILE"
+      printf '\n'
     fi
   else
+    printf "$(i18n_message '[argo-monitor] HTTPS 响应正文（%s）：\n' '[argo-monitor] HTTPS response body (%s):\n')" "$DOMAIN"
     printf '%s\n' "$(i18n_message '（空响应）' '(empty response)')"
   fi
   rm -f -- "$BODY_FILE"
