@@ -6164,7 +6164,7 @@ argo_monitor_wait_healthy_domain() {
     [ "$REMAIN_US" -gt 0 ] || break
     SLEEP_US=3000000
     [ "$REMAIN_US" -lt "$SLEEP_US" ] && SLEEP_US=$REMAIN_US
-    printf -v SLEEP_SEC '0.%06d' "$SLEEP_US"
+    printf -v SLEEP_SEC '%d.%06d' "$((SLEEP_US / 1000000))" "$((SLEEP_US % 1000000))"
     sleep "$SLEEP_SEC"
   done
   return 1
