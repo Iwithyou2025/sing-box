@@ -6083,9 +6083,9 @@ argo_monitor_domain_healthy() {
 }
 
 # Retry a newly allocated Quick Tunnel hostname until HTTPS is ready.
-# The 15s deadline includes all curl attempts and sleeps; retry every 500ms.
+# The 200s deadline includes all curl attempts and sleeps; retry every 500ms.
 argo_monitor_wait_healthy_domain() {
-  local DOMAIN="$1" WAIT_MS="${2:-15000}" NOW_US DEADLINE_US REMAIN_US REMAIN_MS
+  local DOMAIN="$1" WAIT_MS="${2:-200000}" NOW_US DEADLINE_US REMAIN_US REMAIN_MS
   local HTTP_CODE='' EXIT_CODE=0 ATTEMPT=0 MAX_TIME SLEEP_US SLEEP_SEC
   # Distinguish pending rebuild (no HTTP response) from an actual HTTP error.
   ARGO_MONITOR_HTTPS_WAIT_RESULT='error'
@@ -6182,9 +6182,9 @@ argo_monitor_publish_domain() {
   fi
   if ! argo_monitor_wait_healthy_domain "$CANDIDATE"; then
     if [ "${ARGO_MONITOR_HTTPS_WAIT_RESULT:-error}" = 'pending' ]; then
-      printf "$(i18n_message '[argo-monitor] 新域名重建等待超时（15 秒，始终未收到 HTTP 响应），订阅未更新：%s\n' '[argo-monitor] candidate rebuild timed out (15s without HTTP response); subscriptions unchanged: %s\n')" "$CANDIDATE"
+      printf "$(i18n_message '[argo-monitor] 新域名重建等待超时（200 秒，始终未收到 HTTP 响应），订阅未更新：%s\n' '[argo-monitor] candidate rebuild timed out (200s without HTTP response); subscriptions unchanged: %s\n')" "$CANDIDATE"
     else
-      printf "$(i18n_message '[argo-monitor] 警告：新域名在 15 秒内未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain did not pass HTTP health check within 15s: %s\n')" "$CANDIDATE"
+      printf "$(i18n_message '[argo-monitor] 警告：新域名在 200 秒内未通过 HTTP 健康检查：%s\n' '[argo-monitor] WARNING: new domain did not pass HTTP health check within 200s: %s\n')" "$CANDIDATE"
     fi
     return 1
   fi
