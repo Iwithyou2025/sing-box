@@ -46,7 +46,10 @@ systemctl() {
 }
 rc-update() {
   case "$*" in
-    'show default') test -e "$WORK_DIR/enabled" && printf 'argo-monitor | default\n' || return 1 ;;
+    'show default')
+      [ ! -e "$WORK_DIR/argo-enabled" ] || printf 'argo | default\n'
+      [ ! -e "$WORK_DIR/enabled" ] || printf 'argo-monitor | default\n'
+      ;;
     'add argo-monitor default') printf 'rc-add\n' >> "$WORK_DIR/commands"; : > "$WORK_DIR/enabled" ;;
     *) printf 'Unexpected rc-update: %s\n' "$*" >&2; return 99 ;;
   esac
