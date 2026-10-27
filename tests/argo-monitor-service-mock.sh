@@ -10,13 +10,19 @@ printf 'ExecStart=/tmp/cloudflared tunnel --url http://localhost:8080\n' > "$ARG
 chmod +x "$WORK_DIR/sb.sh"
 
 # Load the actual current function with only hardcoded filesystem paths sandboxed.
-sed -n '/^argo_monitor_sync() {/,/^argo_monitor_live_domain() {/p' sing-box.sh | sed '$d' |
+sed -n '/^argo_monitor_pause() {/,/^argo_monitor_live_domain() {/p' sing-box.sh | sed '$d' |
   sed -e "s|/etc/systemd/system/argo-monitor.service|$WORK_DIR/argo-monitor.service|g" \
       -e "s|/etc/init.d/argo-monitor|$WORK_DIR/argo-monitor.init|g" > "$WORK_DIR/func.sh"
 source "$WORK_DIR/func.sh"
 
 systemctl() {
   case "$*" in
+    'is-enabled --quiet argo.service') test -e "$WORK_DIR/argo-enabled" ;;
+    'is-active --quiet argo.service') test -e "$WORK_DIR/argo-active" ;;
+    'disable --now argo-monitor.service')
+      printf 'disable-now\n' >> "$WORK_DIR/commands"
+      rm -f "$WORK_DIR/enabled" "$WORK_DIR/active"
+      ;;
     'is-enabled --quiet argo-monitor.service') test -e "$WORK_DIR/enabled" ;;
     'is-active --quiet argo-monitor.service') test -e "$WORK_DIR/active" ;;
     'daemon-reload') printf 'daemon-reload\n' >> "$WORK_DIR/commands" ;;
@@ -69,6 +75,8 @@ count_commands() {
 }
 
 SYSTEM=Ubuntu
+: > "$WORK_DIR/argo-enabled"
+: > "$WORK_DIR/argo-active"
 printf '[Unit]\n' > "$WORK_DIR/argo-monitor.service"
 
 # Fully active & enabled: avoid needless service restart.
@@ -102,6 +110,35 @@ test -e "$WORK_DIR/enabled"
 
 # Existing file, disabled and stopped: repair both.
 reset_case
+argo_monitor_sync
+count_commands 1
+test -e "$WORK_DIR/enabled" && test -e "$WORK_DIR/active"
+
+# If Argo is disabled, a separate sync must NOT re-enable its monitor.
+reset_case
+: > "$WORK_DIR/enabled"
+: > "$WORK_DIR/active"
+rm -f "$WORK_DIR/argo-enabled"
+printf 'keep-me\n' > "$WORK_DIR/argo-domain"
+argo_monitor_sync
+count_commands 1
+grep -qx disable-now "$WORK_DIR/commands"
+test ! -e "$WORK_DIR/enabled" && test ! -e "$WORK_DIR/active"
+grep -qx keep-me "$WORK_DIR/argo-domain"
+
+# Same behavior for enabled but stopped Argo.
+reset_case
+: > "$WORK_DIR/enabled"
+: > "$WORK_DIR/active"
+: > "$WORK_DIR/argo-enabled"
+rm -f "$WORK_DIR/argo-active"
+argo_monitor_sync
+count_commands 1
+grep -qx disable-now "$WORK_DIR/commands"
+
+# After the tunnel becomes enabled and active, sync may restore monitoring.
+reset_case
+: > "$WORK_DIR/argo-active"
 argo_monitor_sync
 count_commands 1
 test -e "$WORK_DIR/enabled" && test -e "$WORK_DIR/active"
